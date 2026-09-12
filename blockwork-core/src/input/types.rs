@@ -211,6 +211,19 @@ impl InputToken {
         }
     }
 
+    /// See `Value::rename_list` — walks every embedded `Value` tree.
+    pub fn rename_list(&mut self, old: &str, new: &str) {
+        match self {
+            InputToken::MoveMouse(x, y, _) => {
+                x.rename_list(old, new);
+                y.rename_list(old, new);
+            }
+            InputToken::Scroll(amount, _) => amount.rename_list(old, new),
+            InputToken::Text(value) => value.rename_list(old, new),
+            InputToken::Key(..) | InputToken::Button(..) | InputToken::Raw(..) => {}
+        }
+    }
+
     /// See `Value::rename_param` — walks every embedded `Value` tree.
     pub fn rename_param(&mut self, old: &str, new: &str) {
         match self {

@@ -71,7 +71,8 @@ export type ValueOp =
   | 'PluggedIn'
   // One fixed-dropdown arg (year/month/date/day of week/hour/minute/second)
   // — always numeric, see timeSchedule.ts's CURRENT_TIME_OPTIONS.
-  | 'CurrentTime';
+  | 'CurrentTime'
+  | 'ListItem' | 'ListItemNumber' | 'ListAmount' | 'ListLength' | 'ListContains' | 'ListItemExists' | 'ListIsEmpty';
 // Join/Join3 both emit op 'Join' (only args.length differs, no 'Join3' on the
 // wire). `Var:<name>`/`Param:<name>` are per-variable/per-input identifiers,
 // not fixed operators. `Call:<blockId>` (a "My Blocks" reporter) has dynamic
@@ -92,6 +93,17 @@ export type ValueDto =
   | { kind: 'Var'; name: string }
   | { kind: 'Param'; name: string }
   | { kind: 'Call'; block_id: string; args: ValueDto[]; saved: ValueDto };
+
+/** Literal-only list item. Lists never store expressions, booleans, or refs. */
+export type ListItemDto = { kind: 'Number'; value: number } | { kind: 'Text'; value: string };
+
+export interface ListDto {
+  name: string;
+  items: ListItemDto[];
+  editor_visible: boolean;
+  editor_x: number;
+  editor_y: number;
+}
 
 export function numberValue(value: number): ValueDto {
   return bsNumberValue(value);
@@ -234,6 +246,13 @@ export type InstructionDto = { id: string } & (
   | { type: 'CloseApp'; command: string; name: string; icon: string | null }
   | { type: 'SetVariable'; name: string; value: ValueDto }
   | { type: 'ChangeVariable'; name: string; value: ValueDto }
+  | { type: 'AddToList'; value: ValueDto; name: string }
+  | { type: 'DeleteOfList'; index: ValueDto; name: string }
+  | { type: 'DeleteAllOfList'; name: string }
+  | { type: 'ShiftList'; name: string; amount: ValueDto }
+  | { type: 'InsertIntoList'; value: ValueDto; index: ValueDto; name: string }
+  | { type: 'ReplaceItemOfList'; index: ValueDto; name: string; value: ValueDto }
+  | { type: 'ReverseList'; name: string }
   | { type: 'BlockHeader'; block_id: string }
   | { type: 'CallBlock'; block_id: string; args: ValueDto[] }
   | { type: 'Return'; value: ValueDto }
@@ -277,6 +296,13 @@ export function defaultInstruction(type: InstructionType): InstructionDto {
     case 'Comment': return { id, type: 'Comment', comment: '' };
     case 'SetVariable': return { id, type: 'SetVariable', name: '', value: numberValue(0) };
     case 'ChangeVariable': return { id, type: 'ChangeVariable', name: '', value: numberValue(0) };
+    case 'AddToList': return { id, type: 'AddToList', name: '', value: textValue('thing') };
+    case 'DeleteOfList': return { id, type: 'DeleteOfList', name: '', index: numberValue(1) };
+    case 'DeleteAllOfList': return { id, type: 'DeleteAllOfList', name: '' };
+    case 'ShiftList': return { id, type: 'ShiftList', name: '', amount: numberValue(1) };
+    case 'InsertIntoList': return { id, type: 'InsertIntoList', name: '', value: textValue('thing'), index: numberValue(1) };
+    case 'ReplaceItemOfList': return { id, type: 'ReplaceItemOfList', name: '', index: numberValue(1), value: textValue('thing') };
+    case 'ReverseList': return { id, type: 'ReverseList', name: '' };
     case 'BlockHeader': return { id, type: 'BlockHeader', block_id: '' };
     case 'CallBlock': return { id, type: 'CallBlock', block_id: '', args: [] };
     case 'Return': return { id, type: 'Return', value: numberValue(0) };
@@ -354,6 +380,7 @@ export interface MacroDto {
   /** Declared variable names only — no current-value "watcher" UI. Insertion
    * order; use `sortedVariableNames` for display. */
   variables: string[];
+  lists: ListDto[];
   /** User-defined custom blocks ("My Blocks") — see `BlockDefDto`. */
   block_defs: BlockDefDto[];
   /** Settings edited from the "Macro Settings" popup — see `MacroSettingsDto`. */
@@ -394,6 +421,10 @@ export interface ImportPromptDto {
  * list and every Set/Change dropdown. */
 export function sortedVariableNames(macro: MacroDto | null | undefined): string[] {
   return [...(macro?.variables ?? [])].sort((a, b) => a.localeCompare(b));
+}
+
+export function sortedListNames(macro: MacroDto | null | undefined): string[] {
+  return [...(macro?.lists ?? [])].map(list => list.name).sort((a, b) => a.localeCompare(b));
 }
 
 // What kind of value an input slot expects — 'Any' (number-or-text, the

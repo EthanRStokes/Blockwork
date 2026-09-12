@@ -242,6 +242,31 @@ async fn invoke_handler(
             };
             call!(commands::delete_variable(state, app, name))
         }
+        "create_list" => {
+            let name: String = match field(&body, "name") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            call!(commands::create_list(state, app, name))
+        }
+        "rename_list" => {
+            let old_name: String = match field(&body, "oldName") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            let new_name: String = match field(&body, "newName") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            call!(commands::rename_list(state, app, old_name, new_name))
+        }
+        "delete_list" => {
+            let name: String = match field(&body, "name") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            call!(commands::delete_list(state, app, name))
+        }
+        "set_list_items" => {
+            let name: String = match field(&body, "name") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            let items: Vec<crate::state::ListItemDto> = match field(&body, "items") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            call!(commands::set_list_items(state, app, name, items))
+        }
+        "set_list_editor_state" => {
+            let name: String = match field(&body, "name") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            let visible: bool = match field(&body, "visible") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            let x: i32 = match field(&body, "x") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            let y: i32 = match field(&body, "y") { Ok(v) => v, Err(e) => return ok_response::<()>(Err(e)) };
+            call!(commands::set_list_editor_state(state, app, name, visible, x, y))
+        }
         "create_block" => {
             let pieces: Vec<BlockPieceDto> = match field(&body, "pieces") {
                 Ok(v) => v,

@@ -1,20 +1,20 @@
 use crate::macros_thread;
 use crate::state::{
-    BlockPieceDto, ComboCapture, FieldId, HotkeyActionDto, InstructionDto, KeyCaptureTarget,
-    MacroSnapshot, Page, PathStep, RecordingPhase, SharedState, StateDto, TextEditSession,
-    UpdateCheckState, ValueDto, ValueLocation, ValueLocationDto, build_state_dto,
-    dto_to_block_piece, dto_to_hotkey_action, dto_to_instruction, dto_to_value, emit_state_updated,
-    value_to_dto,
+    build_state_dto, dto_to_block_piece, dto_to_hotkey_action, dto_to_instruction, dto_to_value,
+    emit_state_updated, value_to_dto, BlockPieceDto, ComboCapture, FieldId, HotkeyActionDto,
+    InstructionDto, KeyCaptureTarget, ListItemDto, MacroSnapshot, Page, PathStep, RecordingPhase,
+    SharedState, StateDto, TextEditSession, UpdateCheckState, ValueDto, ValueLocation,
+    ValueLocationDto,
 };
 use blockwork_core::config;
 use blockwork_core::hotkey_types::{HotkeyAction, HotkeyBinding, KeyCombo};
 use blockwork_core::input::types::InputToken;
-use blockwork_core::input::value::{Evaluated, OPERATOR_KINDS, Value};
-use blockwork_core::macros::runner::VariableStore;
+use blockwork_core::input::value::{Evaluated, Value, OPERATOR_KINDS};
+use blockwork_core::macros::runner::{resolve_list_reporters, ListStore, VariableStore};
 use blockwork_core::macros::{
-    BlockPiece, BlockShape, Comment, FloatingValue, Instruction, InstructionKind, Macro,
-    SPEED_MULTIPLIER_RANGE, Strand, VariableDef, loop_control,
-    normalize_block_color as normalize_persisted_block_color,
+    loop_control, normalize_block_color as normalize_persisted_block_color, BlockPiece, BlockShape,
+    Comment, FloatingValue, InputValueType, Instruction, InstructionKind, ListDef, Macro,
+    Strand, VariableDef, SPEED_MULTIPLIER_RANGE,
 };
 use blockwork_core::recording;
 use std::collections::HashMap;
@@ -39,6 +39,8 @@ fn push_undo(s: &mut crate::state::AppState) {
             floating_values: mac.floating_values.clone(),
             comments: mac.comments.clone(),
             block_defs: mac.block_defs.clone(),
+            variables: mac.variables.clone(),
+            lists: mac.lists.clone(),
         });
         s.redo_stack.clear();
     }
@@ -84,6 +86,20 @@ fn sync_variable_values(s: &mut crate::state::AppState) {
     }
 }
 
+fn sync_list_values(s: &mut crate::state::AppState) {
+    let values = match &s.current_macro {
+        Some(mac) => mac
+            .lists
+            .iter()
+            .map(|list| (list.name.clone(), list.items.clone()))
+            .collect(),
+        None => HashMap::new(),
+    };
+    if let Ok(mut store) = s.list_values.lock() {
+        *store = values;
+    }
+}
+
 fn auto_save(s: &crate::state::AppState) {
     if let Some(mac) = &s.current_macro {
         if let Err(e) = mac.save() {
@@ -125,6 +141,7 @@ pub(crate) fn select_macro<R: Runtime>(
     s.invalid_field_buffers.clear();
     s.text_edit_session = None;
     sync_variable_values(&mut s);
+    sync_list_values(&mut s);
     emit_state_updated(&app, &s);
     Ok(())
 }
@@ -155,6 +172,7 @@ pub(crate) fn new_macro<R: Runtime>(
     }
     s.invalid_field_buffers.clear();
     sync_variable_values(&mut s);
+    sync_list_values(&mut s);
     emit_state_updated(&app, &s);
     Ok(())
 }
@@ -288,8 +306,7 @@ fn rename_variable_in(mac: &mut Macro, old_name: &str, new_name: &str) -> Result
     Ok(trimmed)
 }
 
-/// Renames a declared variable and every reference to it. No `push_undo`,
-/// same as `create_variable`.
+/// Renames a declared variable and every reference to it.
 #[tauri::command]
 pub(crate) fn rename_variable<R: Runtime>(
     state: State<SharedState>,
@@ -298,13 +315,34 @@ pub(crate) fn rename_variable<R: Runtime>(
     new_name: String,
 ) -> Result<(), String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
-    let mac = s.current_macro.as_mut().ok_or("No macro selected")?;
-    let trimmed = rename_variable_in(mac, &old_name, &new_name)?;
-    if trimmed != old_name {
-        if let Ok(mut store) = s.variable_values.lock() {
-            if let Some(v) = store.remove(&old_name) {
-                store.insert(trimmed, v);
-            }
+    // Validate before checkpointing so rejected or no-op renames do not add
+    // useless undo entries.
+    let trimmed = new_name.trim().to_string();
+    {
+        let mac = s.current_macro.as_ref().ok_or("No macro selected")?;
+        if trimmed.is_empty() {
+            return Err("Variable name can't be empty".to_string());
+        }
+        if trimmed != old_name && mac.variables.iter().any(|var| var.name == trimmed) {
+            return Err(format!("A variable named \"{trimmed}\" already exists"));
+        }
+        if !mac.variables.iter().any(|var| var.name == old_name) {
+            return Err("Variable not found".to_string());
+        }
+    }
+    if trimmed == old_name {
+        return Ok(());
+    }
+
+    push_undo(&mut s);
+    rename_variable_in(
+        s.current_macro.as_mut().ok_or("No macro selected")?,
+        &old_name,
+        &trimmed,
+    )?;
+    if let Ok(mut store) = s.variable_values.lock() {
+        if let Some(v) = store.remove(&old_name) {
+            store.insert(trimmed, v);
         }
     }
     auto_save(&s);
@@ -332,6 +370,168 @@ pub(crate) fn delete_variable<R: Runtime>(
     if let Ok(mut store) = s.variable_values.lock() {
         store.remove(&name);
     }
+    auto_save(&s);
+    emit_state_updated(&app, &s);
+    Ok(())
+}
+
+fn create_list_in(mac: &mut Macro, name: &str) -> Result<String, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("List name can't be empty".to_string());
+    }
+    if mac.lists.iter().any(|list| list.name == trimmed) {
+        return Err(format!("A list named \"{trimmed}\" already exists"));
+    }
+    mac.lists.push(ListDef {
+        name: trimmed.clone(),
+        items: vec![],
+        editor_visible: false,
+        editor_x: 36,
+        editor_y: 36,
+    });
+    Ok(trimmed)
+}
+
+#[tauri::command]
+pub(crate) fn create_list<R: Runtime>(
+    state: State<SharedState>,
+    app: tauri::AppHandle<R>,
+    name: String,
+) -> Result<(), String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    // Validate before checkpointing so a rejected name never creates a dead
+    // undo entry.
+    {
+        let mac = s.current_macro.as_ref().ok_or("No macro selected")?;
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("List name can't be empty".to_string());
+        }
+        if mac.lists.iter().any(|list| list.name == trimmed) {
+            return Err(format!("A list named \"{trimmed}\" already exists"));
+        }
+    }
+    push_undo(&mut s);
+    create_list_in(s.current_macro.as_mut().ok_or("No macro selected")?, &name)?;
+    sync_list_values(&mut s);
+    auto_save(&s);
+    emit_state_updated(&app, &s);
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn rename_list<R: Runtime>(
+    state: State<SharedState>,
+    app: tauri::AppHandle<R>,
+    old_name: String,
+    new_name: String,
+) -> Result<(), String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let trimmed = new_name.trim().to_string();
+    {
+        let mac = s.current_macro.as_ref().ok_or("No macro selected")?;
+        if trimmed.is_empty() {
+            return Err("List name can't be empty".to_string());
+        }
+        if trimmed != old_name && mac.lists.iter().any(|list| list.name == trimmed) {
+            return Err(format!("A list named \"{trimmed}\" already exists"));
+        }
+        if !mac.lists.iter().any(|list| list.name == old_name) {
+            return Err("List not found".to_string());
+        }
+    }
+    if trimmed == old_name {
+        return Ok(());
+    }
+
+    push_undo(&mut s);
+    s.current_macro
+        .as_mut()
+        .ok_or("No macro selected")?
+        .rename_list(&old_name, &trimmed);
+    sync_list_values(&mut s);
+    auto_save(&s);
+    emit_state_updated(&app, &s);
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn delete_list<R: Runtime>(
+    state: State<SharedState>,
+    app: tauri::AppHandle<R>,
+    name: String,
+) -> Result<(), String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let exists = s
+        .current_macro
+        .as_ref()
+        .ok_or("No macro selected")?
+        .lists
+        .iter()
+        .any(|list| list.name == name);
+    if exists {
+        push_undo(&mut s);
+        s.current_macro
+            .as_mut()
+            .expect("checked above")
+            .lists
+            .retain(|list| list.name != name);
+    }
+    sync_list_values(&mut s);
+    auto_save(&s);
+    emit_state_updated(&app, &s);
+    Ok(())
+}
+
+/// Replaces a list's visible-editor contents. `ListItemDto` intentionally has
+/// no boolean/expression case, which enforces the literal-only list contract.
+#[tauri::command]
+pub(crate) fn set_list_items<R: Runtime>(
+    state: State<SharedState>,
+    app: tauri::AppHandle<R>,
+    name: String,
+    items: Vec<ListItemDto>,
+) -> Result<(), String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let list = s
+        .current_macro
+        .as_mut()
+        .ok_or("No macro selected")?
+        .lists
+        .iter_mut()
+        .find(|list| list.name == name)
+        .ok_or("List not found")?;
+    list.items = items.iter().map(crate::state::dto_to_list_item).collect();
+    sync_list_values(&mut s);
+    auto_save(&s);
+    emit_state_updated(&app, &s);
+    Ok(())
+}
+
+/// Saves whether a list's editable canvas monitor is open and where it sits.
+/// This is a presentation preference rather than an undoable macro edit.
+#[tauri::command]
+pub(crate) fn set_list_editor_state<R: Runtime>(
+    state: State<SharedState>,
+    app: tauri::AppHandle<R>,
+    name: String,
+    visible: bool,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    let list = s
+        .current_macro
+        .as_mut()
+        .ok_or("No macro selected")?
+        .lists
+        .iter_mut()
+        .find(|list| list.name == name)
+        .ok_or("List not found")?;
+    list.editor_visible = visible;
+    list.editor_x = x.max(0);
+    list.editor_y = y.max(0);
     auto_save(&s);
     emit_state_updated(&app, &s);
     Ok(())
@@ -658,6 +858,7 @@ fn commit_imported_macro<R: Runtime>(
     }
     s.invalid_field_buffers.clear();
     sync_variable_values(&mut s);
+    sync_list_values(&mut s);
     emit_state_updated(app, &s);
     Ok(())
 }
@@ -902,17 +1103,15 @@ mod loop_control_placement_tests {
     #[test]
     fn non_loop_control_instructions_are_always_allowed() {
         let strand = strand_with(vec![Instruction::new(InstructionKind::WhenRan)]);
-        assert!(
-            check_loop_control_placement(
-                &strand,
-                &[PathStep {
-                    index: 1,
-                    slot: None
-                }],
-                &Instruction::new(InstructionKind::Comment("x".into()))
-            )
-            .is_ok()
-        );
+        assert!(check_loop_control_placement(
+            &strand,
+            &[PathStep {
+                index: 1,
+                slot: None
+            }],
+            &Instruction::new(InstructionKind::Comment("x".into()))
+        )
+        .is_ok());
     }
 
     #[test]
@@ -922,14 +1121,12 @@ mod loop_control_placement_tests {
             index: 1,
             slot: None,
         }];
-        assert!(
-            check_loop_control_placement(
-                &strand,
-                &path,
-                &Instruction::new(InstructionKind::EscapeLoop)
-            )
-            .is_err()
-        );
+        assert!(check_loop_control_placement(
+            &strand,
+            &path,
+            &Instruction::new(InstructionKind::EscapeLoop)
+        )
+        .is_err());
     }
 
     #[test]
@@ -952,14 +1149,12 @@ mod loop_control_placement_tests {
                 slot: None,
             },
         ];
-        assert!(
-            check_loop_control_placement(
-                &strand,
-                &path,
-                &Instruction::new(InstructionKind::ContinueLoop)
-            )
-            .is_ok()
-        );
+        assert!(check_loop_control_placement(
+            &strand,
+            &path,
+            &Instruction::new(InstructionKind::ContinueLoop)
+        )
+        .is_ok());
     }
 
     #[test]
@@ -989,14 +1184,12 @@ mod loop_control_placement_tests {
                 slot: None,
             },
         ];
-        assert!(
-            check_loop_control_placement(
-                &strand,
-                &path,
-                &Instruction::new(InstructionKind::EscapeLoop)
-            )
-            .is_ok()
-        );
+        assert!(check_loop_control_placement(
+            &strand,
+            &path,
+            &Instruction::new(InstructionKind::EscapeLoop)
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1018,14 +1211,12 @@ mod loop_control_placement_tests {
                 slot: None,
             },
         ];
-        assert!(
-            check_loop_control_placement(
-                &strand,
-                &path,
-                &Instruction::new(InstructionKind::EscapeLoop)
-            )
-            .is_err()
-        );
+        assert!(check_loop_control_placement(
+            &strand,
+            &path,
+            &Instruction::new(InstructionKind::EscapeLoop)
+        )
+        .is_err());
     }
 }
 
@@ -1079,6 +1270,21 @@ fn value_slot_mut(ins: &mut Instruction, field: FieldId) -> Option<&mut Value> {
         (InstructionKind::Return(v), FieldId::ReturnValue) => Some(v),
         (InstructionKind::CallBlock { args, .. }, FieldId::CallArg(i)) => args.get_mut(i),
         (InstructionKind::ChangeVariable(_, v), FieldId::ChangeVariableValue) => Some(v),
+        (InstructionKind::AddToList { value, .. }, FieldId::AddToListValue) => Some(value),
+        (InstructionKind::DeleteOfList { index, .. }, FieldId::DeleteOfListIndex) => Some(index),
+        (InstructionKind::ShiftList { amount, .. }, FieldId::ShiftListAmount) => Some(amount),
+        (InstructionKind::InsertIntoList { value, .. }, FieldId::InsertIntoListValue) => {
+            Some(value)
+        }
+        (InstructionKind::InsertIntoList { index, .. }, FieldId::InsertIntoListIndex) => {
+            Some(index)
+        }
+        (InstructionKind::ReplaceItemOfList { index, .. }, FieldId::ReplaceItemOfListIndex) => {
+            Some(index)
+        }
+        (InstructionKind::ReplaceItemOfList { value, .. }, FieldId::ReplaceItemOfListValue) => {
+            Some(value)
+        }
         (InstructionKind::If { condition, .. }, FieldId::Condition) => Some(condition),
         (InstructionKind::IfElse { condition, .. }, FieldId::Condition) => Some(condition),
         (InstructionKind::While { condition, .. }, FieldId::Condition) => Some(condition),
@@ -1112,13 +1318,15 @@ fn resolve_location_mut<'a>(mac: &'a mut Macro, location: &ValueLocation) -> Opt
     }
 }
 
-/// `MoveMouseX/Y`, `ScrollAmount`, and the battery-percentage thresholds are
-/// integer-only fields; everything else (including floating value blocks)
-/// allows decimals.
+/// Pixel fields, list positions, and battery-percentage thresholds are
+/// integer-only; everything else (including floating value blocks) allows
+/// decimals.
 fn location_requires_integer(location: &ValueLocation) -> bool {
     matches!(location, ValueLocation::Field { field_id, .. }
         if matches!(field_id, FieldId::MoveMouseX | FieldId::MoveMouseY | FieldId::ScrollAmount
-            | FieldId::BatteryDischargeThreshold | FieldId::BatteryChargeThreshold))
+            | FieldId::BatteryDischargeThreshold | FieldId::BatteryChargeThreshold
+            | FieldId::DeleteOfListIndex | FieldId::ShiftListAmount | FieldId::InsertIntoListIndex
+            | FieldId::ReplaceItemOfListIndex))
 }
 
 /// Drops buffered invalid-text entries at or beneath `location` — used
@@ -1267,8 +1475,65 @@ pub(crate) fn set_value_kind<R: Runtime>(
     result
 }
 
+/// Returns the correct blank value for a top-level input field. In
+/// particular, a Boolean custom-block argument must restore its blank
+/// hexagon, rather than a generic numeric zero.
+fn default_value_for_location(mac: &Macro, location: &ValueLocation) -> Value {
+    let ValueLocation::Field {
+        strand_id,
+        index,
+        field_id,
+        path,
+    } = location
+    else {
+        return Value::number(0.0);
+    };
+    if !path.is_empty() {
+        return Value::number(0.0);
+    }
+    if matches!(field_id, FieldId::Condition) {
+        return Value::Bool;
+    }
+    let FieldId::CallArg(arg_index) = field_id else {
+        return Value::number(0.0);
+    };
+    let Some(strand) = mac.strand(strand_id) else {
+        return Value::number(0.0);
+    };
+    let Some((instructions, instruction_index)) = resolve_body(&strand.instructions, index) else {
+        return Value::number(0.0);
+    };
+    let Some(Instruction {
+        kind: InstructionKind::CallBlock { block_id, .. },
+        ..
+    }) = instructions.get(instruction_index)
+    else {
+        return Value::number(0.0);
+    };
+    let is_boolean = mac
+        .block_defs
+        .iter()
+        .find(|definition| definition.id.as_str() == block_id)
+        .and_then(|definition| {
+            definition
+                .pieces
+                .iter()
+                .filter_map(|piece| match piece {
+                    BlockPiece::Input { value_type, .. } => Some(*value_type),
+                    BlockPiece::Label { .. } => None,
+                })
+                .nth(*arg_index)
+        })
+        == Some(InputValueType::Bool);
+    if is_boolean {
+        Value::Bool
+    } else {
+        Value::number(0.0)
+    }
+}
+
 /// Removes the value at `location` and returns it, leaving a `Field`
-/// location holding whatever it was shadowing (or `0` for a plain leaf); a
+/// location holding whatever it was shadowing (or its typed blank value); a
 /// root `Floating` location is deleted entirely. Pairs with `put_value`/
 /// `create_floating_value` on the frontend side of a drag.
 #[tauri::command]
@@ -1291,10 +1556,11 @@ pub(crate) fn take_value<R: Runtime>(
                 return Some(mac.floating_values.remove(idx).value);
             }
         }
+        let fallback = default_value_for_location(mac, &loc);
         let node = resolve_location_mut(mac, &loc)?;
         let restored = match &*node {
-            Value::Op { saved, .. } => (**saved).clone(),
-            _ => Value::number(0.0),
+            Value::Op { saved, .. } | Value::Call { saved, .. } => (**saved).clone(),
+            _ => fallback,
         };
         Some(std::mem::replace(node, restored))
     })();
@@ -1323,7 +1589,7 @@ pub(crate) fn put_value<R: Runtime>(
     if let Some(mac) = &mut s.current_macro {
         if let Some(node) = resolve_location_mut(mac, &loc) {
             let mut incoming = dto_to_value(&value);
-            if let Value::Op { saved, .. } = &mut incoming {
+            if let Value::Op { saved, .. } | Value::Call { saved, .. } = &mut incoming {
                 *saved = Box::new(node.clone());
             }
             *node = incoming;
@@ -1346,7 +1612,8 @@ pub(crate) fn preview_value(state: State<SharedState>, value: ValueDto) -> Resul
         .lock()
         .map(|g| g.clone())
         .unwrap_or_default();
-    preview_value_with_env(&value, &env)
+    let lists = s.list_values.lock().map(|g| g.clone()).unwrap_or_default();
+    preview_value_with_env_and_lists(&value, &env, &lists)
 }
 
 /// The actual evaluation logic behind `preview_value`, factored out so it's
@@ -1355,7 +1622,15 @@ fn preview_value_with_env(
     value: &ValueDto,
     env: &HashMap<String, Evaluated>,
 ) -> Result<String, String> {
-    dto_to_value(value).resolve_vars(env).eval_text()
+    preview_value_with_env_and_lists(value, env, &HashMap::new())
+}
+
+fn preview_value_with_env_and_lists(
+    value: &ValueDto,
+    env: &HashMap<String, Evaluated>,
+    lists: &HashMap<String, Vec<blockwork_core::macros::ListItem>>,
+) -> Result<String, String> {
+    resolve_list_reporters(&dto_to_value(value).resolve_vars(env), lists)?.eval_text()
 }
 
 /// Creates a new value block parked on open canvas — for a sidebar drop, or
@@ -1675,16 +1950,20 @@ pub(crate) fn reorder_instruction<R: Runtime>(
     if let Some(mac) = &s.current_macro {
         if let Some(strand) = mac.strand(&strand_id) {
             if let Some((list, index)) = resolve_body(&strand.instructions, &path) {
-              let len = list.len();
-              if len > 1 && index < len {
-                let new_index = if direction < 0 {
-                    if index > 0 { index - 1 } else { index }
-                } else if index < len - 1 {
-                    index + 1
-                } else {
-                    index
-                };
-                // Swapping either end into position 0 would move a When Ran
+                let len = list.len();
+                if len > 1 && index < len {
+                    let new_index = if direction < 0 {
+                        if index > 0 {
+                            index - 1
+                        } else {
+                            index
+                        }
+                    } else if index < len - 1 {
+                        index + 1
+                    } else {
+                        index
+                    };
+                    // Swapping either end into position 0 would move a When Ran
                     // block out of (or something else into) the head slot — only
                     // relevant at a strand's own top level, never a nested body.
                     let starts_with_header = list.first().map_or(false, Instruction::is_header);
@@ -1700,11 +1979,11 @@ pub(crate) fn reorder_instruction<R: Runtime>(
                                     list.swap(index, new_index);
                                 }
                             }
-                        s.invalid_field_buffers.clear();
-                        auto_save(&s);
+                            s.invalid_field_buffers.clear();
+                            auto_save(&s);
+                        }
                     }
                 }
-            }
             }
         }
     }
@@ -1768,6 +2047,8 @@ fn perform_undo<R: Runtime>(state: &SharedState, app: &tauri::AppHandle<R>) -> R
             floating_values: m.floating_values.clone(),
             comments: m.comments.clone(),
             block_defs: m.block_defs.clone(),
+            variables: m.variables.clone(),
+            lists: m.lists.clone(),
         });
         if let Some(cur) = current {
             s.redo_stack.push(cur);
@@ -1777,8 +2058,12 @@ fn perform_undo<R: Runtime>(state: &SharedState, app: &tauri::AppHandle<R>) -> R
             mac.floating_values = prev.floating_values;
             mac.comments = prev.comments;
             mac.block_defs = prev.block_defs;
+            mac.variables = prev.variables;
+            mac.lists = prev.lists;
             mac.ensure_id();
         }
+        sync_variable_values(&mut s);
+        sync_list_values(&mut s);
         s.invalid_field_buffers.clear();
         // Without this, the next keystroke into the same field would see a
         // "continuing" session and skip pushing a new undo step.
@@ -1797,6 +2082,8 @@ fn perform_redo<R: Runtime>(state: &SharedState, app: &tauri::AppHandle<R>) -> R
             floating_values: m.floating_values.clone(),
             comments: m.comments.clone(),
             block_defs: m.block_defs.clone(),
+            variables: m.variables.clone(),
+            lists: m.lists.clone(),
         });
         if let Some(cur) = current {
             s.undo_stack.push(cur);
@@ -1806,8 +2093,12 @@ fn perform_redo<R: Runtime>(state: &SharedState, app: &tauri::AppHandle<R>) -> R
             mac.floating_values = next.floating_values;
             mac.comments = next.comments;
             mac.block_defs = next.block_defs;
+            mac.variables = next.variables;
+            mac.lists = next.lists;
             mac.ensure_id();
         }
+        sync_variable_values(&mut s);
+        sync_list_values(&mut s);
         s.invalid_field_buffers.clear();
         s.text_edit_session = None;
         auto_save(&s);
@@ -2143,7 +2434,7 @@ pub(crate) fn run_macro<R: Runtime>(
     state: State<SharedState>,
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    let (mac, emulator, is_looping, loop_mode, speed_multiplier, variables) = {
+    let (mac, emulator, is_looping, loop_mode, speed_multiplier, variables, lists) = {
         let s = state.lock().map_err(|e| e.to_string())?;
         let mac = s.current_macro.clone();
         let emulator = s.emulator.as_ref().map(Arc::clone);
@@ -2152,6 +2443,7 @@ pub(crate) fn run_macro<R: Runtime>(
         let speed_multiplier =
             mac.as_ref().map_or(1.0, |m| m.speed_multiplier) * s.global_speed_multiplier;
         let variables = Arc::clone(&s.variable_values);
+        let lists = Arc::clone(&s.list_values);
         (
             mac,
             emulator,
@@ -2159,6 +2451,7 @@ pub(crate) fn run_macro<R: Runtime>(
             loop_mode,
             speed_multiplier,
             variables,
+            lists,
         )
     };
 
@@ -2175,6 +2468,7 @@ pub(crate) fn run_macro<R: Runtime>(
                 Arc::clone(&is_looping),
                 speed_multiplier,
                 variables,
+                lists,
                 Arc::clone(&*state),
                 app.clone(),
             );
@@ -2196,6 +2490,7 @@ pub(crate) fn run_macro<R: Runtime>(
                 Arc::clone(&is_looping),
                 speed_multiplier,
                 variables,
+                lists,
                 Arc::clone(&*state),
                 app.clone(),
             );
@@ -2816,6 +3111,12 @@ pub(crate) fn handle_hotkey_action<R: Runtime>(
                             .map(|v| (v.name.clone(), v.value.clone()))
                             .collect(),
                     ));
+                    let lists: ListStore = Arc::new(Mutex::new(
+                        mac.lists
+                            .iter()
+                            .map(|list| (list.name.clone(), list.items.clone()))
+                            .collect(),
+                    ));
                     run_macro_task(
                         mac,
                         emulator,
@@ -2823,6 +3124,7 @@ pub(crate) fn handle_hotkey_action<R: Runtime>(
                         loop_mode,
                         speed_multiplier,
                         variables,
+                        lists,
                         shared_state,
                         app.clone(),
                     );
@@ -2855,6 +3157,8 @@ pub(crate) fn handle_hotkey_action<R: Runtime>(
                     if let Some(mac) = &s.current_macro {
                         config::set_selected_macro_id(Some(&mac.id));
                     }
+                    sync_variable_values(&mut s);
+                    sync_list_values(&mut s);
                     emit_state_updated(app, &s);
                 }
             }
@@ -2877,6 +3181,8 @@ pub(crate) fn handle_hotkey_action<R: Runtime>(
                     if let Some(mac) = &s.current_macro {
                         config::set_selected_macro_id(Some(&mac.id));
                     }
+                    sync_variable_values(&mut s);
+                    sync_list_values(&mut s);
                     emit_state_updated(app, &s);
                 }
             }
@@ -2922,6 +3228,7 @@ fn run_macro_task<R: Runtime>(
     loop_mode: bool,
     speed_multiplier: f64,
     variables: VariableStore,
+    lists: ListStore,
     state: SharedState,
     app: tauri::AppHandle<R>,
 ) {
@@ -2943,6 +3250,7 @@ fn run_macro_task<R: Runtime>(
             loop_flag,
             speed_multiplier,
             variables,
+            lists,
             state,
             app,
         );
@@ -2966,6 +3274,7 @@ fn run_macro_task<R: Runtime>(
             stop_flag,
             speed_multiplier,
             variables,
+            lists,
             state,
             app,
         );

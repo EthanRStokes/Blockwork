@@ -3,7 +3,7 @@ use std::io;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use evdev::{AbsoluteAxisCode, AttributeSet, EventType, InputEvent, KeyCode, PropType, RelativeAxisCode, uinput::VirtualDevice, uinput::VirtualDeviceBuilder};
+use evdev::{AbsoluteAxisCode, AttributeSet, EventType, InputEvent, KeyCode, PropType, RelativeAxisCode, uinput::VirtualDevice};
 use tracing::warn;
 
 use crate::input::types::{Axis, Direction, MacroButton, MacroKey};
@@ -85,7 +85,7 @@ fn build_virtual_device() -> io::Result<VirtualDevice> {
         rel_axes.insert(ax);
     }
 
-    VirtualDeviceBuilder::new()?
+    VirtualDevice::builder()?
         .name("macros-input")
         .with_keys(&keys)?
         .with_relative_axes(&rel_axes)?

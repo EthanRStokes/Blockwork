@@ -79,6 +79,15 @@ pub enum Op {
     /// `Hour` is always 24-hour (0-23) regardless of the UI's display
     /// format, matching Scratch's own "current ()" sensing block.
     CurrentTime,
+    /// List reporters are resolved by the macro runner, which owns the live
+    /// list store; direct `Value::eval` intentionally rejects them.
+    ListItem,
+    ListItemNumber,
+    ListAmount,
+    ListLength,
+    ListContains,
+    ListItemExists,
+    ListIsEmpty,
 }
 
 /// Recursive expression tree backing a numeric/text instruction field — a
@@ -264,6 +273,13 @@ pub const OPERATOR_KINDS: &[OperatorKindSpec] = &[
     // (the frontend's own default for a freshly-dragged block always picks
     // the enumArg's first option).
     OperatorKindSpec { kind: "CurrentTime", op: Op::CurrentTime, arity: 1, default_args: || vec![Value::Text { value: "Year".to_string() }] },
+    OperatorKindSpec { kind: "ListItem", op: Op::ListItem, arity: 2, default_args: || vec![Value::number(1.0), text_default()] },
+    OperatorKindSpec { kind: "ListItemNumber", op: Op::ListItemNumber, arity: 2, default_args: || vec![text_default(), text_default()] },
+    OperatorKindSpec { kind: "ListAmount", op: Op::ListAmount, arity: 2, default_args: || vec![text_default(), text_default()] },
+    OperatorKindSpec { kind: "ListLength", op: Op::ListLength, arity: 1, default_args: || vec![text_default()] },
+    OperatorKindSpec { kind: "ListContains", op: Op::ListContains, arity: 2, default_args: || vec![text_default(), text_default()] },
+    OperatorKindSpec { kind: "ListItemExists", op: Op::ListItemExists, arity: 2, default_args: || vec![Value::number(1.0), text_default()] },
+    OperatorKindSpec { kind: "ListIsEmpty", op: Op::ListIsEmpty, arity: 1, default_args: || vec![text_default()] },
 ];
 
 /// 1-based char index of the first occurrence of `needle` in `haystack`, or
@@ -318,6 +334,7 @@ impl Value {
             // errors instead of running anything.
             Value::Param { .. } => Err("unresolved parameter reference".to_string()),
             Value::Call { .. } => Err("custom block calls can't be evaluated directly".to_string()),
+            Value::Op { op: Op::ListItem | Op::ListItemNumber | Op::ListAmount | Op::ListLength | Op::ListContains | Op::ListItemExists | Op::ListIsEmpty, .. } => Err("list reporter needs macro runner".to_string()),
             Value::Op { op: Op::Join, args, .. } => {
                 let mut s = String::new();
                 for a in args {
@@ -438,7 +455,8 @@ impl Value {
                     }
                     Op::Join | Op::NewLine | Op::Tab | Op::Length | Op::IndexOf | Op::LastIndexOf | Op::LetterOf | Op::Case
                     | Op::Round | Op::Math | Op::True | Op::False | Op::Not | Op::And | Op::Or | Op::Eq | Op::Neq | Op::Gt | Op::Lt
-                    | Op::Gte | Op::Lte | Op::BatteryPercentage | Op::PluggedIn | Op::CurrentTime => unreachable!("matched above"),
+                    | Op::Gte | Op::Lte | Op::BatteryPercentage | Op::PluggedIn | Op::CurrentTime
+                    | Op::ListItem | Op::ListItemNumber | Op::ListAmount | Op::ListLength | Op::ListContains | Op::ListItemExists | Op::ListIsEmpty => unreachable!("matched above"),
                 };
                 Ok(Evaluated::Number(result))
             }
@@ -490,6 +508,38 @@ impl Value {
                 saved.rename_var(old, new);
             }
             Value::Number { .. } | Value::Text { .. } | Value::Bool | Value::Param { .. } => {}
+        }
+    }
+
+    /// Renames the literal list-name argument of every list reporter in this
+    /// value tree. Other text literals are intentionally left untouched.
+    pub fn rename_list(&mut self, old: &str, new: &str) {
+        match self {
+            Value::Op { op, args, saved } => {
+                let name_index = match op {
+                    Op::ListItem | Op::ListItemNumber | Op::ListAmount | Op::ListItemExists => Some(1),
+                    Op::ListLength | Op::ListContains | Op::ListIsEmpty => Some(0),
+                    _ => None,
+                };
+                if let Some(index) = name_index {
+                    if let Some(Value::Text { value }) = args.get_mut(index) {
+                        if value == old {
+                            *value = new.to_string();
+                        }
+                    }
+                }
+                for arg in args.iter_mut() {
+                    arg.rename_list(old, new);
+                }
+                saved.rename_list(old, new);
+            }
+            Value::Call { args, saved, .. } => {
+                for arg in args.iter_mut() {
+                    arg.rename_list(old, new);
+                }
+                saved.rename_list(old, new);
+            }
+            Value::Number { .. } | Value::Text { .. } | Value::Bool | Value::Var { .. } | Value::Param { .. } => {}
         }
     }
 

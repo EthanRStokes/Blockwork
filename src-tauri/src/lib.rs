@@ -79,7 +79,8 @@ pub fn run() {
                 macros_list: vec![],
                 macro_strs: vec![],
                 emulator: make_backend(),
-                variable_values: Arc::new(Mutex::new(HashMap::new())),
+            variable_values: Arc::new(Mutex::new(HashMap::new())),
+            list_values: Arc::new(Mutex::new(HashMap::new())),
                 thread_pool: ThreadPool::new(),
                 is_looping: Arc::new(Mutex::new(false)),
                 loop_mode_enabled: settings.loop_mode_enabled.unwrap_or(false),
@@ -137,6 +138,29 @@ pub fn run() {
                     }
                 }
                 s.macros_list = macros;
+
+                // The selected macro's live stores back reporter previews and
+                // execution. Populate them during startup as well as when a
+                // macro is selected through the UI, otherwise persisted lists
+                // appear in the editor but preview as empty until a reselect.
+                let variables = s.current_macro.as_ref().map(|mac| {
+                    mac.variables
+                        .iter()
+                        .map(|variable| (variable.name.clone(), variable.value.clone()))
+                        .collect()
+                }).unwrap_or_default();
+                let lists = s.current_macro.as_ref().map(|mac| {
+                    mac.lists
+                        .iter()
+                        .map(|list| (list.name.clone(), list.items.clone()))
+                        .collect()
+                }).unwrap_or_default();
+                if let Ok(mut store) = s.variable_values.lock() {
+                    *store = variables;
+                }
+                if let Ok(mut store) = s.list_values.lock() {
+                    *store = lists;
+                }
 
                 // macOS accessibility
                 #[cfg(target_os = "macos")]
@@ -266,6 +290,11 @@ pub fn run() {
             commands::create_variable,
             commands::rename_variable,
             commands::delete_variable,
+            commands::create_list,
+            commands::rename_list,
+            commands::delete_list,
+            commands::set_list_items,
+            commands::set_list_editor_state,
             commands::create_block,
             commands::edit_block,
             commands::delete_block,

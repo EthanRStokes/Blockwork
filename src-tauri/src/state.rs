@@ -9,7 +9,8 @@ use blockwork_core::macros::backend::InputBackend;
 use blockwork_core::macros::thread_pool::ThreadPool;
 use blockwork_core::macros::{
     BlockDef, BlockPiece, BlockShape, Comment, FloatingValue, InputValueType, Instruction,
-    InstructionKind, Macro, MacroSettings, Strand, default_block_color,
+    InstructionKind, ListDef, ListItem, Macro, MacroSettings, Strand, VariableDef,
+    default_block_color,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,6 +44,13 @@ pub(crate) enum FieldId {
     TextValue,
     SetVariableValue,
     ChangeVariableValue,
+    AddToListValue,
+    DeleteOfListIndex,
+    ShiftListAmount,
+    InsertIntoListValue,
+    InsertIntoListIndex,
+    ReplaceItemOfListIndex,
+    ReplaceItemOfListValue,
     ReturnValue,
     /// One of `CallBlock`'s N argument slots, indexed positionally since a
     /// call's arity is dynamic.
@@ -67,6 +75,13 @@ impl std::fmt::Display for FieldId {
             FieldId::TextValue => write!(f, "TextValue"),
             FieldId::SetVariableValue => write!(f, "SetVariableValue"),
             FieldId::ChangeVariableValue => write!(f, "ChangeVariableValue"),
+            FieldId::AddToListValue => write!(f, "AddToListValue"),
+            FieldId::DeleteOfListIndex => write!(f, "DeleteOfListIndex"),
+            FieldId::ShiftListAmount => write!(f, "ShiftListAmount"),
+            FieldId::InsertIntoListValue => write!(f, "InsertIntoListValue"),
+            FieldId::InsertIntoListIndex => write!(f, "InsertIntoListIndex"),
+            FieldId::ReplaceItemOfListIndex => write!(f, "ReplaceItemOfListIndex"),
+            FieldId::ReplaceItemOfListValue => write!(f, "ReplaceItemOfListValue"),
             FieldId::ReturnValue => write!(f, "ReturnValue"),
             FieldId::CallArg(i) => write!(f, "CallArg:{i}"),
             FieldId::Condition => write!(f, "Condition"),
@@ -88,6 +103,13 @@ impl std::str::FromStr for FieldId {
             "TextValue" => Ok(FieldId::TextValue),
             "SetVariableValue" => Ok(FieldId::SetVariableValue),
             "ChangeVariableValue" => Ok(FieldId::ChangeVariableValue),
+            "AddToListValue" => Ok(FieldId::AddToListValue),
+            "DeleteOfListIndex" => Ok(FieldId::DeleteOfListIndex),
+            "ShiftListAmount" => Ok(FieldId::ShiftListAmount),
+            "InsertIntoListValue" => Ok(FieldId::InsertIntoListValue),
+            "InsertIntoListIndex" => Ok(FieldId::InsertIntoListIndex),
+            "ReplaceItemOfListIndex" => Ok(FieldId::ReplaceItemOfListIndex),
+            "ReplaceItemOfListValue" => Ok(FieldId::ReplaceItemOfListValue),
             "ReturnValue" => Ok(FieldId::ReturnValue),
             "Condition" => Ok(FieldId::Condition),
             "RepeatCount" => Ok(FieldId::RepeatCount),
@@ -141,14 +163,16 @@ pub(crate) enum KeyCaptureTarget {
     Standalone,
 }
 
-/// One undo/redo checkpoint — everything a "structural" edit command can
-/// change: the strand list and the floating value blocks parked on canvas.
+/// One undo/redo checkpoint — the structural macro state, including declared
+/// variables for renames and lists for creation or deletion.
 #[derive(Debug, Clone)]
 pub(crate) struct MacroSnapshot {
     pub(crate) strands: Vec<Strand>,
     pub(crate) floating_values: Vec<FloatingValue>,
     pub(crate) comments: Vec<Comment>,
     pub(crate) block_defs: Vec<BlockDef>,
+    pub(crate) variables: Vec<VariableDef>,
+    pub(crate) lists: Vec<ListDef>,
 }
 
 pub(crate) struct AppState {
@@ -161,6 +185,8 @@ pub(crate) struct AppState {
     /// long-running macro never blocks other commands. Synced from the
     /// selected macro on load, written back to disk once a run finishes.
     pub(crate) variable_values: Arc<Mutex<HashMap<String, Evaluated>>>,
+    /// Live macro-wide list values, parallel to `variable_values`.
+    pub(crate) list_values: Arc<Mutex<HashMap<String, Vec<ListItem>>>>,
     pub(crate) thread_pool: ThreadPool,
     pub(crate) is_looping: Arc<Mutex<bool>>,
     pub(crate) loop_mode_enabled: bool,
@@ -258,6 +284,8 @@ pub(crate) struct MacroDto {
     /// Declared variable names only, for the sidebar/dropdowns — current
     /// values aren't surfaced to the frontend.
     pub(crate) variables: Vec<String>,
+    /// Macro-scoped lists, including their literal items for the list editor.
+    pub(crate) lists: Vec<ListDto>,
     /// User-defined custom blocks ("My Blocks").
     pub(crate) block_defs: Vec<BlockDefDto>,
     /// Settings edited from the "Macro Settings" popup — see `MacroSettingsDto`.
@@ -316,6 +344,42 @@ pub(crate) struct BlockDefDto {
     pub(crate) shape: BlockShape,
     #[serde(default = "default_block_color")]
     pub(crate) color: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "kind", content = "value")]
+pub(crate) enum ListItemDto {
+    Number(f64),
+    Text(String),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(crate) struct ListDto {
+    pub(crate) name: String,
+    pub(crate) items: Vec<ListItemDto>,
+    pub(crate) editor_visible: bool,
+    pub(crate) editor_x: i32,
+    pub(crate) editor_y: i32,
+}
+
+fn list_to_dto(list: &ListDef) -> ListDto {
+    ListDto {
+        name: list.name.clone(),
+        items: list.items.iter().map(|item| match item {
+            ListItem::Number(value) => ListItemDto::Number(*value),
+            ListItem::Text(value) => ListItemDto::Text(value.clone()),
+        }).collect(),
+        editor_visible: list.editor_visible,
+        editor_x: list.editor_x,
+        editor_y: list.editor_y,
+    }
+}
+
+pub(crate) fn dto_to_list_item(item: &ListItemDto) -> ListItem {
+    match item {
+        ListItemDto::Number(value) => ListItem::Number(*value),
+        ListItemDto::Text(value) => ListItem::Text(value.clone()),
+    }
 }
 
 pub(crate) fn block_piece_to_dto(piece: &BlockPiece) -> BlockPieceDto {
@@ -629,6 +693,13 @@ pub(crate) enum InstructionDto {
         name: String,
         value: ValueDto,
     },
+    AddToList { id: String, value: ValueDto, name: String },
+    DeleteOfList { id: String, index: ValueDto, name: String },
+    DeleteAllOfList { id: String, name: String },
+    ShiftList { id: String, name: String, amount: ValueDto },
+    InsertIntoList { id: String, value: ValueDto, index: ValueDto, name: String },
+    ReplaceItemOfList { id: String, index: ValueDto, name: String, value: ValueDto },
+    ReverseList { id: String, name: String },
     BlockHeader {
         id: String,
         block_id: String,
@@ -916,6 +987,13 @@ pub(crate) fn instruction_to_dto(ins: &Instruction) -> InstructionDto {
             name: name.clone(),
             value: value_to_dto(value),
         },
+        InstructionKind::AddToList { value, name } => InstructionDto::AddToList { id, value: value_to_dto(value), name: name.clone() },
+        InstructionKind::DeleteOfList { index, name } => InstructionDto::DeleteOfList { id, index: value_to_dto(index), name: name.clone() },
+        InstructionKind::DeleteAllOfList { name } => InstructionDto::DeleteAllOfList { id, name: name.clone() },
+        InstructionKind::ShiftList { name, amount } => InstructionDto::ShiftList { id, name: name.clone(), amount: value_to_dto(amount) },
+        InstructionKind::InsertIntoList { value, index, name } => InstructionDto::InsertIntoList { id, value: value_to_dto(value), index: value_to_dto(index), name: name.clone() },
+        InstructionKind::ReplaceItemOfList { index, name, value } => InstructionDto::ReplaceItemOfList { id, index: value_to_dto(index), name: name.clone(), value: value_to_dto(value) },
+        InstructionKind::ReverseList { name } => InstructionDto::ReverseList { id, name: name.clone() },
         InstructionKind::BlockHeader(block_id) => InstructionDto::BlockHeader {
             id,
             block_id: block_id.clone(),
@@ -1094,6 +1172,13 @@ pub(crate) fn dto_to_instruction(dto: &InstructionDto) -> Option<Instruction> {
             id,
             InstructionKind::ChangeVariable(name.clone(), dto_to_value(value)),
         ),
+        InstructionDto::AddToList { id, value, name } => (id, InstructionKind::AddToList { value: dto_to_value(value), name: name.clone() }),
+        InstructionDto::DeleteOfList { id, index, name } => (id, InstructionKind::DeleteOfList { index: dto_to_value(index), name: name.clone() }),
+        InstructionDto::DeleteAllOfList { id, name } => (id, InstructionKind::DeleteAllOfList { name: name.clone() }),
+        InstructionDto::ShiftList { id, name, amount } => (id, InstructionKind::ShiftList { name: name.clone(), amount: dto_to_value(amount) }),
+        InstructionDto::InsertIntoList { id, value, index, name } => (id, InstructionKind::InsertIntoList { value: dto_to_value(value), index: dto_to_value(index), name: name.clone() }),
+        InstructionDto::ReplaceItemOfList { id, index, name, value } => (id, InstructionKind::ReplaceItemOfList { index: dto_to_value(index), name: name.clone(), value: dto_to_value(value) }),
+        InstructionDto::ReverseList { id, name } => (id, InstructionKind::ReverseList { name: name.clone() }),
         InstructionDto::BlockHeader { id, block_id } => {
             (id, InstructionKind::BlockHeader(block_id.clone()))
         }
@@ -1225,6 +1310,7 @@ fn macro_to_dto(mac: &Macro) -> MacroDto {
             .collect(),
         comments: mac.comments.iter().map(comment_to_dto).collect(),
         variables: mac.variables.iter().map(|v| v.name.clone()).collect(),
+        lists: mac.lists.iter().map(list_to_dto).collect(),
         block_defs: mac.block_defs.iter().map(block_def_to_dto).collect(),
         settings: macro_settings_to_dto(&mac.settings),
     }

@@ -115,6 +115,76 @@ pub struct VariableDef {
     pub value: Evaluated,
 }
 
+/// A list item is deliberately a literal only: unlike an instruction field it
+/// cannot contain an expression, variable, or custom-block call. This keeps a
+/// saved list stable and makes the editor safe to edit directly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+pub enum ListItem {
+    Number(f64),
+    Text(String),
+}
+
+impl ListItem {
+    pub fn from_evaluated(value: Evaluated) -> Option<Self> {
+        match value {
+            Evaluated::Number(value) => Some(Self::Number(value)),
+            Evaluated::Text(value) => Some(Self::Text(value)),
+            Evaluated::Bool(_) => None,
+        }
+    }
+
+    pub fn evaluated(&self) -> Evaluated {
+        match self {
+            Self::Number(value) => Evaluated::Number(*value),
+            Self::Text(value) => Evaluated::Text(value.clone()),
+        }
+    }
+}
+
+impl std::hash::Hash for ListItem {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Number(value) => {
+                0u8.hash(state);
+                value.to_bits().hash(state);
+            }
+            Self::Text(value) => {
+                1u8.hash(state);
+                value.hash(state);
+            }
+        }
+    }
+}
+
+/// A named, macro-scoped collection. Lists live alongside variables but only
+/// hold literal number/text items (see `ListItem`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListDef {
+    pub name: String,
+    #[serde(default)]
+    pub items: Vec<ListItem>,
+    /// Whether the editable list monitor is visible on the canvas. This is
+    /// persisted with its macro so reopening the app restores it.
+    #[serde(default)]
+    pub editor_visible: bool,
+    /// Canvas position of the editable list monitor in CSS pixels.
+    #[serde(default)]
+    pub editor_x: i32,
+    #[serde(default)]
+    pub editor_y: i32,
+}
+
+impl std::hash::Hash for ListDef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.items.hash(state);
+        self.editor_visible.hash(state);
+        self.editor_x.hash(state);
+        self.editor_y.hash(state);
+    }
+}
+
 /// What kind of value an input slot expects — drives the blank default a
 /// fresh call site's argument gets (`Value::number(0.0)` vs `Value::Bool`,
 /// see `reconcile_block_call_args`) and, transitively, whether that slot
@@ -313,6 +383,12 @@ impl InstructionKind {
                 }
                 value.rename_var(old, new);
             }
+            InstructionKind::AddToList { value, .. } | InstructionKind::InsertIntoList { value, .. } => value.rename_var(old, new),
+            InstructionKind::DeleteOfList { index, .. } | InstructionKind::ShiftList { amount: index, .. } => index.rename_var(old, new),
+            InstructionKind::ReplaceItemOfList { index, value, .. } => {
+                index.rename_var(old, new);
+                value.rename_var(old, new);
+            }
             InstructionKind::CallBlock { args, .. } => {
                 for a in args.iter_mut() {
                     a.rename_var(old, new);
@@ -361,7 +437,65 @@ impl InstructionKind {
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
             | InstructionKind::OpenApp { .. }
-            | InstructionKind::CloseApp { .. } => {}
+            | InstructionKind::CloseApp { .. }
+            | InstructionKind::DeleteAllOfList { .. }
+            | InstructionKind::ReverseList { .. } => {}
+        }
+    }
+
+    /// Renames command targets and list-reporter references throughout this
+    /// instruction, including nested control-flow bodies.
+    pub fn rename_list(&mut self, old: &str, new: &str) {
+        match self {
+            InstructionKind::Wait(value)
+            | InstructionKind::Return(value)
+            | InstructionKind::WhenBatteryDischargedTo(value)
+            | InstructionKind::WhenBatteryChargedTo(value) => value.rename_list(old, new),
+            InstructionKind::Token(token) => token.rename_list(old, new),
+            InstructionKind::SetVariable(_, value) | InstructionKind::ChangeVariable(_, value) => value.rename_list(old, new),
+            InstructionKind::AddToList { name, value }
+            | InstructionKind::InsertIntoList { name, value, .. } => {
+                if name == old { *name = new.to_string(); }
+                value.rename_list(old, new);
+            }
+            InstructionKind::DeleteOfList { name, index } | InstructionKind::ShiftList { name, amount: index } => {
+                if name == old { *name = new.to_string(); }
+                index.rename_list(old, new);
+            }
+            InstructionKind::ReplaceItemOfList { name, index, value } => {
+                if name == old { *name = new.to_string(); }
+                index.rename_list(old, new);
+                value.rename_list(old, new);
+            }
+            InstructionKind::DeleteAllOfList { name } | InstructionKind::ReverseList { name } => {
+                if name == old { *name = new.to_string(); }
+            }
+            InstructionKind::CallBlock { args, .. } => {
+                for arg in args { arg.rename_list(old, new); }
+            }
+            InstructionKind::If { condition, body } => {
+                condition.rename_list(old, new);
+                for instruction in body { instruction.rename_list(old, new); }
+            }
+            InstructionKind::IfElse { condition, then_body, else_body } => {
+                condition.rename_list(old, new);
+                for instruction in then_body.iter_mut().chain(else_body) { instruction.rename_list(old, new); }
+            }
+            InstructionKind::Repeat { count, body } => {
+                count.rename_list(old, new);
+                for instruction in body { instruction.rename_list(old, new); }
+            }
+            InstructionKind::Forever { body } => {
+                for instruction in body { instruction.rename_list(old, new); }
+            }
+            InstructionKind::While { condition, body } => {
+                condition.rename_list(old, new);
+                for instruction in body { instruction.rename_list(old, new); }
+            }
+            InstructionKind::Command(_) | InstructionKind::Comment(_) | InstructionKind::WhenRan
+            | InstructionKind::BlockHeader(_) | InstructionKind::EscapeLoop | InstructionKind::ContinueLoop
+            | InstructionKind::WhenTime(_) | InstructionKind::WhenPowerPluggedIn | InstructionKind::WhenPowerUnplugged
+            | InstructionKind::OpenApp { .. } | InstructionKind::CloseApp { .. } => {}
         }
     }
 
@@ -380,6 +514,12 @@ impl InstructionKind {
             InstructionKind::Token(token) => token.migrate_bool_slots(),
             InstructionKind::SetVariable(_, value) | InstructionKind::ChangeVariable(_, value) => {
                 value.migrate_bool_slots(false)
+            }
+            InstructionKind::AddToList { value, .. } | InstructionKind::InsertIntoList { value, .. } => value.migrate_bool_slots(false),
+            InstructionKind::DeleteOfList { index, .. } | InstructionKind::ShiftList { amount: index, .. } => index.migrate_bool_slots(false),
+            InstructionKind::ReplaceItemOfList { index, value, .. } => {
+                index.migrate_bool_slots(false);
+                value.migrate_bool_slots(false);
             }
             InstructionKind::CallBlock { args, .. } => {
                 for a in args.iter_mut() {
@@ -429,7 +569,9 @@ impl InstructionKind {
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
             | InstructionKind::OpenApp { .. }
-            | InstructionKind::CloseApp { .. } => {}
+            | InstructionKind::CloseApp { .. }
+            | InstructionKind::DeleteAllOfList { .. }
+            | InstructionKind::ReverseList { .. } => {}
         }
     }
 
@@ -444,6 +586,12 @@ impl InstructionKind {
             InstructionKind::Token(token) => token.rename_param(old, new),
             InstructionKind::SetVariable(_, value) | InstructionKind::ChangeVariable(_, value) => {
                 value.rename_param(old, new)
+            }
+            InstructionKind::AddToList { value, .. } | InstructionKind::InsertIntoList { value, .. } => value.rename_param(old, new),
+            InstructionKind::DeleteOfList { index, .. } | InstructionKind::ShiftList { amount: index, .. } => index.rename_param(old, new),
+            InstructionKind::ReplaceItemOfList { index, value, .. } => {
+                index.rename_param(old, new);
+                value.rename_param(old, new);
             }
             InstructionKind::CallBlock { args, .. } => {
                 for a in args.iter_mut() {
@@ -493,7 +641,9 @@ impl InstructionKind {
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
             | InstructionKind::OpenApp { .. }
-            | InstructionKind::CloseApp { .. } => {}
+            | InstructionKind::CloseApp { .. }
+            | InstructionKind::DeleteAllOfList { .. }
+            | InstructionKind::ReverseList { .. } => {}
         }
     }
 
@@ -511,6 +661,12 @@ impl InstructionKind {
             InstructionKind::Token(token) => token.for_each_call_args_mut(block_id, f),
             InstructionKind::SetVariable(_, value) | InstructionKind::ChangeVariable(_, value) => {
                 value.for_each_call_args_mut(block_id, f)
+            }
+            InstructionKind::AddToList { value, .. } | InstructionKind::InsertIntoList { value, .. } => value.for_each_call_args_mut(block_id, f),
+            InstructionKind::DeleteOfList { index, .. } | InstructionKind::ShiftList { amount: index, .. } => index.for_each_call_args_mut(block_id, f),
+            InstructionKind::ReplaceItemOfList { index, value, .. } => {
+                index.for_each_call_args_mut(block_id, f);
+                value.for_each_call_args_mut(block_id, f);
             }
             InstructionKind::CallBlock { block_id: id, args } => {
                 if id == block_id {
@@ -563,7 +719,9 @@ impl InstructionKind {
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
             | InstructionKind::OpenApp { .. }
-            | InstructionKind::CloseApp { .. } => {}
+            | InstructionKind::CloseApp { .. }
+            | InstructionKind::DeleteAllOfList { .. }
+            | InstructionKind::ReverseList { .. } => {}
         }
     }
 
@@ -579,6 +737,12 @@ impl InstructionKind {
             InstructionKind::Token(token) => token.scrub_block_calls(block_id),
             InstructionKind::SetVariable(_, value) | InstructionKind::ChangeVariable(_, value) => {
                 value.scrub_block_calls(block_id)
+            }
+            InstructionKind::AddToList { value, .. } | InstructionKind::InsertIntoList { value, .. } => value.scrub_block_calls(block_id),
+            InstructionKind::DeleteOfList { index, .. } | InstructionKind::ShiftList { amount: index, .. } => index.scrub_block_calls(block_id),
+            InstructionKind::ReplaceItemOfList { index, value, .. } => {
+                index.scrub_block_calls(block_id);
+                value.scrub_block_calls(block_id);
             }
             InstructionKind::CallBlock { args, .. } => {
                 for a in args.iter_mut() {
@@ -628,7 +792,9 @@ impl InstructionKind {
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
             | InstructionKind::OpenApp { .. }
-            | InstructionKind::CloseApp { .. } => {}
+            | InstructionKind::CloseApp { .. }
+            | InstructionKind::DeleteAllOfList { .. }
+            | InstructionKind::ReverseList { .. } => {}
         }
     }
 
@@ -697,6 +863,9 @@ pub struct Macro {
     /// User-declared macro-wide variables — see `VariableDef`.
     #[serde(default)]
     pub variables: Vec<VariableDef>,
+    /// User-declared macro-wide lists — see `ListDef`.
+    #[serde(default)]
+    pub lists: Vec<ListDef>,
     /// User-defined custom blocks ("My Blocks") — see `BlockDef`. Each
     /// def's body lives in its own header strand within `strands`.
     #[serde(default)]
@@ -749,6 +918,8 @@ enum MacroDe {
         #[serde(default)]
         variables: Vec<VariableDef>,
         #[serde(default)]
+        lists: Vec<ListDef>,
+        #[serde(default)]
         block_defs: Vec<BlockDef>,
         #[serde(default)]
         settings: MacroSettings,
@@ -775,6 +946,7 @@ impl From<MacroDe> for Macro {
                 floating_values,
                 comments,
                 variables,
+                lists,
                 block_defs,
                 settings,
             } => {
@@ -797,6 +969,7 @@ impl From<MacroDe> for Macro {
                     floating_values,
                     comments,
                     variables,
+                    lists,
                     block_defs,
                     settings,
                 }
@@ -824,6 +997,7 @@ impl From<MacroDe> for Macro {
                     floating_values: Vec::new(),
                     comments: Vec::new(),
                     variables: Vec::new(),
+                    lists: Vec::new(),
                     block_defs: Vec::new(),
                     settings: MacroSettings::default(),
                 }
@@ -837,6 +1011,7 @@ impl From<MacroDe> for Macro {
                 ins.migrate_bool_slots();
             }
         }
+        mac.migrate_custom_block_bool_args();
         for fv in mac.floating_values.iter_mut() {
             fv.value.migrate_bool_slots(false);
         }
@@ -853,6 +1028,64 @@ impl From<MacroDe> for Macro {
 }
 
 impl Macro {
+    /// Repairs legacy numeric blanks at `CallBlock` argument positions whose
+    /// declared custom-block input is Boolean. Unlike built-in `If`/`While`
+    /// slots, the expected type lives in the referenced `BlockDef`, so the
+    /// generic `InstructionKind::migrate_bool_slots` cannot determine it on
+    /// its own.
+    fn migrate_custom_block_bool_args(&mut self) {
+        let boolean_inputs: HashMap<String, Vec<bool>> = self
+            .block_defs
+            .iter()
+            .map(|definition| {
+                let inputs = definition
+                    .pieces
+                    .iter()
+                    .filter_map(|piece| match piece {
+                        BlockPiece::Input { value_type, .. } => {
+                            Some(*value_type == InputValueType::Bool)
+                        }
+                        BlockPiece::Label { .. } => None,
+                    })
+                    .collect();
+                (definition.id.clone(), inputs)
+            })
+            .collect();
+
+        fn repair(instructions: &mut [Instruction], boolean_inputs: &HashMap<String, Vec<bool>>) {
+            for instruction in instructions {
+                match &mut instruction.kind {
+                    InstructionKind::CallBlock { block_id, args } => {
+                        if let Some(expected) = boolean_inputs.get(block_id) {
+                            for (arg, expects_bool) in args.iter_mut().zip(expected) {
+                                if *expects_bool {
+                                    arg.migrate_bool_slots(true);
+                                }
+                            }
+                        }
+                    }
+                    InstructionKind::If { body, .. }
+                    | InstructionKind::Repeat { body, .. }
+                    | InstructionKind::Forever { body }
+                    | InstructionKind::While { body, .. } => repair(body, boolean_inputs),
+                    InstructionKind::IfElse {
+                        then_body,
+                        else_body,
+                        ..
+                    } => {
+                        repair(then_body, boolean_inputs);
+                        repair(else_body, boolean_inputs);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for strand in &mut self.strands {
+            repair(&mut strand.instructions, &boolean_inputs);
+        }
+    }
+
     pub fn new(name: String, description: String, mut code: Vec<Instruction>) -> Self {
         code.insert(0, Instruction::new(InstructionKind::WhenRan));
         let strand = Strand {
@@ -871,6 +1104,7 @@ impl Macro {
             floating_values: Vec::new(),
             comments: Vec::new(),
             variables: Vec::new(),
+            lists: Vec::new(),
             block_defs: Vec::new(),
             settings: MacroSettings::default(),
         }
@@ -978,6 +1212,15 @@ impl Macro {
         }
     }
 
+    /// Writes live runtime list contents back into their declared lists.
+    pub fn sync_lists_from(&mut self, values: &HashMap<String, Vec<ListItem>>) {
+        for list in &mut self.lists {
+            if let Some(items) = values.get(&list.name) {
+                list.items = items.clone();
+            }
+        }
+    }
+
     /// Renames a declared variable and every reference to it (`Value::Var`
     /// reads, `SetVariable`/`ChangeVariable` targets) across all strands and
     /// floating values. No-op if `old` isn't declared.
@@ -994,6 +1237,23 @@ impl Macro {
         }
         for fv in &mut self.floating_values {
             fv.value.rename_var(old, new);
+        }
+    }
+
+    /// Renames a declared list and every command/reporter reference to it.
+    pub fn rename_list(&mut self, old: &str, new: &str) {
+        if let Some(list) = self.lists.iter_mut().find(|list| list.name == old) {
+            list.name = new.to_string();
+        } else {
+            return;
+        }
+        for strand in &mut self.strands {
+            for instruction in &mut strand.instructions {
+                instruction.rename_list(old, new);
+            }
+        }
+        for floating_value in &mut self.floating_values {
+            floating_value.value.rename_list(old, new);
         }
     }
 
@@ -1218,6 +1478,20 @@ pub enum InstructionKind {
     /// No-op if `value` isn't numeric; the variable is coerced to `0` first
     /// if it wasn't already numeric.
     ChangeVariable(String, Value),
+    /// Appends a number/text value to a named list. Boolean values are ignored.
+    AddToList { value: Value, name: String },
+    /// Removes the 1-based item at `index` from a named list.
+    DeleteOfList { index: Value, name: String },
+    /// Removes every item from a named list.
+    DeleteAllOfList { name: String },
+    /// Rotates a named list by `amount` positions (positive is toward the end).
+    ShiftList { name: String, amount: Value },
+    /// Inserts a number/text value at the 1-based `index` in a named list.
+    InsertIntoList { value: Value, index: Value, name: String },
+    /// Replaces the 1-based item at `index` in a named list with a literal.
+    ReplaceItemOfList { index: Value, name: String, value: Value },
+    /// Reverses a named list in place.
+    ReverseList { name: String },
     /// Marks a strand as a custom block's body; the `String` is the
     /// `BlockDef::id`. Header-only, like `WhenRan`, but never auto-runs —
     /// only invoked via `CallBlock`/`Value::Call`.
@@ -1280,6 +1554,7 @@ impl std::hash::Hash for Macro {
         self.floating_values.hash(state);
         self.comments.hash(state);
         self.variables.hash(state);
+        self.lists.hash(state);
         self.block_defs.hash(state);
         self.settings.hash(state);
     }
@@ -1403,6 +1678,13 @@ impl std::hash::Hash for InstructionKind {
                 name.hash(state);
                 icon.hash(state);
             }
+            Self::AddToList { value, name } => { 24u8.hash(state); value.hash(state); name.hash(state); }
+            Self::DeleteOfList { index, name } => { 25u8.hash(state); index.hash(state); name.hash(state); }
+            Self::DeleteAllOfList { name } => { 26u8.hash(state); name.hash(state); }
+            Self::ShiftList { name, amount } => { 27u8.hash(state); name.hash(state); amount.hash(state); }
+            Self::InsertIntoList { value, index, name } => { 28u8.hash(state); value.hash(state); index.hash(state); name.hash(state); }
+            Self::ReplaceItemOfList { index, name, value } => { 29u8.hash(state); index.hash(state); name.hash(state); value.hash(state); }
+            Self::ReverseList { name } => { 30u8.hash(state); name.hash(state); }
         }
     }
 }
@@ -1431,6 +1713,13 @@ enum InstructionKindDe {
     },
     SetVariable(String, Value),
     ChangeVariable(String, Value),
+    AddToList { value: Value, name: String },
+    DeleteOfList { index: Value, name: String },
+    DeleteAllOfList { name: String },
+    ShiftList { name: String, amount: Value },
+    InsertIntoList { value: Value, index: Value, name: String },
+    ReplaceItemOfList { index: Value, name: String, value: Value },
+    ReverseList { name: String },
     BlockHeader(String),
     CallBlock {
         block_id: String,
@@ -1541,6 +1830,13 @@ impl From<InstructionKindDe> for InstructionKind {
             },
             InstructionKindDe::SetVariable(n, v) => InstructionKind::SetVariable(n, v),
             InstructionKindDe::ChangeVariable(n, v) => InstructionKind::ChangeVariable(n, v),
+            InstructionKindDe::AddToList { value, name } => InstructionKind::AddToList { value, name },
+            InstructionKindDe::DeleteOfList { index, name } => InstructionKind::DeleteOfList { index, name },
+            InstructionKindDe::DeleteAllOfList { name } => InstructionKind::DeleteAllOfList { name },
+            InstructionKindDe::ShiftList { name, amount } => InstructionKind::ShiftList { name, amount },
+            InstructionKindDe::InsertIntoList { value, index, name } => InstructionKind::InsertIntoList { value, index, name },
+            InstructionKindDe::ReplaceItemOfList { index, name, value } => InstructionKind::ReplaceItemOfList { index, name, value },
+            InstructionKindDe::ReverseList { name } => InstructionKind::ReverseList { name },
             InstructionKindDe::BlockHeader(id) => InstructionKind::BlockHeader(id),
             InstructionKindDe::CallBlock { block_id, args } => {
                 InstructionKind::CallBlock { block_id, args }
@@ -1598,6 +1894,9 @@ impl Instruction {
     }
     pub fn rename_var(&mut self, old: &str, new: &str) {
         self.kind.rename_var(old, new)
+    }
+    pub fn rename_list(&mut self, old: &str, new: &str) {
+        self.kind.rename_list(old, new)
     }
     pub fn migrate_bool_slots(&mut self) {
         self.kind.migrate_bool_slots()
@@ -1700,6 +1999,24 @@ mod tests {
         let def: BlockDef =
             serde_json::from_str(r#"{"id":"b1","pieces":[],"shape":"Normal"}"#).unwrap();
         assert_eq!(def.color, default_block_color());
+    }
+
+    #[test]
+    fn list_editor_state_round_trips_and_defaults_for_older_lists() {
+        let list = ListDef {
+            name: "queue".into(),
+            items: vec![ListItem::Text("first".into())],
+            editor_visible: true,
+            editor_x: 120,
+            editor_y: 80,
+        };
+        let json = serde_json::to_string(&list).unwrap();
+        let restored: ListDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, list);
+
+        let legacy: ListDef = serde_json::from_str(r#"{"name":"older","items":[]}"#).unwrap();
+        assert!(!legacy.editor_visible);
+        assert_eq!((legacy.editor_x, legacy.editor_y), (0, 0));
     }
 
     #[test]
@@ -1918,6 +2235,30 @@ mod tests {
             }
             other => panic!("expected If(And(..)), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn migrate_bool_slots_repairs_custom_block_boolean_arguments() {
+        // The Boolean type of a custom-block argument lives in its
+        // definition, not at the call site. A prior drag-out bug saved a zero
+        // here, so loading must recover the blank hexagon from that type.
+        let json = r#"{"id":"m1","name":"Old","description":"","strands":[
+            {"id":"root","x":0,"y":0,"instructions":[{"CallBlock":{
+                "block_id":"b1","args":[{"kind":"Number","value":0.0}]
+            }}]}
+        ],"block_defs":[{"id":"b1","pieces":[
+            {"kind":"Input","id":"i1","name":"flag","value_type":"Bool"}
+        ],"shape":"Normal"}]}"#;
+        let mac: Macro = serde_json::from_str(json).unwrap();
+        let args = mac.strands[0]
+            .instructions
+            .iter()
+            .find_map(|instruction| match &instruction.kind {
+                InstructionKind::CallBlock { args, .. } => Some(args),
+                _ => None,
+            })
+            .expect("expected CallBlock");
+        assert_eq!(args, &vec![Value::Bool]);
     }
 
     #[test]
