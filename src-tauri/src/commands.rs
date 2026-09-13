@@ -6,6 +6,8 @@ use crate::state::{
     SharedState, StateDto, TextEditSession, UpdateCheckState, ValueDto, ValueLocation,
     ValueLocationDto,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde::Deserialize;
 use blockwork_core::config;
 use blockwork_core::hotkey_types::{HotkeyAction, HotkeyBinding, KeyCombo};
 use blockwork_core::input::types::InputToken;
@@ -13,14 +15,14 @@ use blockwork_core::input::value::{Evaluated, Value, OPERATOR_KINDS};
 use blockwork_core::macros::runner::{resolve_list_reporters, ListStore, VariableStore};
 use blockwork_core::macros::{
     loop_control, normalize_block_color as normalize_persisted_block_color, BlockPiece, BlockShape,
-    Comment, FloatingValue, InputValueType, Instruction, InstructionKind, ListDef, Macro,
-    Strand, VariableDef, SPEED_MULTIPLIER_RANGE,
+    Comment, FloatingValue, InputValueType, Instruction, InstructionKind, ListDef, Macro, Strand,
+    VariableDef, SPEED_MULTIPLIER_RANGE,
 };
 use blockwork_core::recording;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use tauri::{Runtime, State};
+use tauri::{Manager, Runtime, State};
 use tracing::warn;
 
 const CLEAR_CONFIRM_TIMEOUT_SECS: u64 = 3;
@@ -543,11 +545,19 @@ pub(crate) fn set_list_editor_state<R: Runtime>(
 /// block's effective name) must be non-empty, and every input needs a
 /// non-empty, unique trimmed name.
 fn validate_block_pieces(pieces: &[BlockPiece]) -> Result<(), String> {
+    if pieces
+        .iter()
+        .filter(|piece| matches!(piece, BlockPiece::Branch { .. }))
+        .count()
+        > u8::MAX as usize
+    {
+        return Err("A block can have at most 255 branches".to_string());
+    }
     let flat_label: String = pieces
         .iter()
         .filter_map(|p| match p {
             BlockPiece::Label { text, .. } => Some(text.trim()),
-            BlockPiece::Input { .. } => None,
+            BlockPiece::Input { .. } | BlockPiece::Branch { .. } => None,
         })
         .collect::<Vec<_>>()
         .join(" ");
@@ -556,14 +566,18 @@ fn validate_block_pieces(pieces: &[BlockPiece]) -> Result<(), String> {
     }
     let mut seen = std::collections::HashSet::new();
     for p in pieces {
-        if let BlockPiece::Input { name, .. } = p {
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                return Err("Every input needs a name".to_string());
-            }
-            if !seen.insert(trimmed) {
-                return Err(format!("Input name \"{trimmed}\" is used more than once"));
-            }
+        let name = match p {
+            BlockPiece::Input { name, .. } | BlockPiece::Branch { name, .. } => name,
+            BlockPiece::Label { .. } => continue,
+        };
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Every input and branch needs a name".to_string());
+        }
+        if !seen.insert(trimmed) {
+            return Err(format!(
+                "Input or branch name \"{trimmed}\" is used more than once"
+            ));
         }
     }
     Ok(())
@@ -643,8 +657,26 @@ pub(crate) fn edit_block<R: Runtime>(
             (old_name != new_name).then(|| (old_name.clone(), new_name.clone()))
         })
         .collect();
+    let branch_renames: Vec<(String, String)> = new_pieces
+        .iter()
+        .filter_map(|new_piece| {
+            let BlockPiece::Branch { id, name: new_name } = new_piece else {
+                return None;
+            };
+            let old_piece = old_pieces
+                .iter()
+                .find(|p| matches!(p, BlockPiece::Branch { id: old_id, .. } if old_id == id))?;
+            let BlockPiece::Branch { name: old_name, .. } = old_piece else {
+                return None;
+            };
+            (old_name != new_name).then(|| (old_name.clone(), new_name.clone()))
+        })
+        .collect();
     for (old_name, new_name) in &renames {
         mac.rename_block_input_body(&block_id, old_name, new_name);
+    }
+    for (old_name, new_name) in &branch_renames {
+        mac.rename_block_branch_body(&block_id, old_name, new_name);
     }
     mac.reconcile_block_call_args(&block_id, &old_pieces, &new_pieces);
 
@@ -950,6 +982,18 @@ pub(crate) fn add_instruction<R: Runtime>(
 ) -> Result<(), String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     let ins = dto_to_instruction(&instruction).ok_or("Unknown instruction type")?;
+    if let Some(target) = value_branch_target(&strand_id)? {
+        push_undo(&mut s);
+        if let Some(mac) = &mut s.current_macro {
+            let branch = resolve_value_branch_mut(mac, &target).ok_or("Unknown value branch")?;
+            let (list, index) = resolve_body_mut(branch, &path).ok_or("Unknown branch insertion point")?;
+            list.insert(index.min(list.len()), ins);
+            s.invalid_field_buffers.clear();
+            auto_save(&s);
+        }
+        emit_state_updated(&app, &s);
+        return Ok(());
+    }
     if let Some(mac) = &s.current_macro {
         if let Some(strand) = mac.strand(&strand_id) {
             if let Some((list, idx)) = resolve_body(&strand.instructions, &path) {
@@ -1004,6 +1048,30 @@ fn resolve_body_mut<'a>(
     }
     let body = instructions.get_mut(first.index)?.body_mut(first.slot?)?;
     resolve_body_mut(body, rest)
+}
+
+#[derive(Deserialize)]
+struct ValueBranchTarget {
+    location: ValueLocationDto,
+    branch: usize,
+}
+
+fn value_branch_target(id: &str) -> Result<Option<ValueBranchTarget>, String> {
+    let Some(encoded) = id.strip_prefix("value-branch:") else { return Ok(None); };
+    let bytes = STANDARD.decode(encoded).map_err(|_| "Invalid value branch target")?;
+    serde_json::from_slice(&bytes).map(Some).map_err(|_| "Invalid value branch target".to_string())
+}
+
+fn resolve_value_branch_mut<'a>(mac: &'a mut Macro, target: &ValueBranchTarget) -> Option<&'a mut Vec<Instruction>> {
+    let location = target.location.to_location().ok()?;
+    let Value::Call { branches, .. } = resolve_location_mut(mac, &location)? else { return None; };
+    // Calls saved before reporter callbacks existed have no branch arrays.
+    // Their definition still renders the mouths, so materialize each missing
+    // body on first use instead of making an apparently-valid drop disappear.
+    if branches.len() <= target.branch {
+        branches.resize_with(target.branch + 1, Vec::new);
+    }
+    branches.get_mut(target.branch)
 }
 
 /// A header block ("When Ran"/`BlockHeader`) must always be first in its
@@ -1307,6 +1375,15 @@ fn resolve_location_mut<'a>(mac: &'a mut Macro, location: &ValueLocation) -> Opt
             field_id,
             path,
         } => {
+            // A field rendered inside a reporter callback branch uses the
+            // branch's virtual strand id. Resolve it back to the call value
+            // before following the ordinary nested instruction path.
+            if let Ok(Some(target)) = value_branch_target(strand_id) {
+                let branch = resolve_value_branch_mut(mac, &target)?;
+                let (list, idx) = resolve_body_mut(branch, index)?;
+                let ins = list.get_mut(idx)?;
+                return value_slot_mut(ins, *field_id)?.get_mut(path);
+            }
             let strand = mac.strand_mut(strand_id)?;
             let (list, idx) = resolve_body_mut(&mut strand.instructions, index)?;
             let ins = list.get_mut(idx)?;
@@ -1520,7 +1597,7 @@ fn default_value_for_location(mac: &Macro, location: &ValueLocation) -> Value {
                 .iter()
                 .filter_map(|piece| match piece {
                     BlockPiece::Input { value_type, .. } => Some(*value_type),
-                    BlockPiece::Label { .. } => None,
+                    BlockPiece::Label { .. } | BlockPiece::Branch { .. } => None,
                 })
                 .nth(*arg_index)
         })
@@ -2211,6 +2288,20 @@ pub(crate) fn split_strand<R: Runtime>(
     y: i32,
 ) -> Result<String, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
+    if let Some(target) = value_branch_target(&strand_id)? {
+        push_undo(&mut s);
+        let mac = s.current_macro.as_mut().ok_or("No macro selected")?;
+        let branch = resolve_value_branch_mut(mac, &target).ok_or("Unknown value branch")?;
+        let (list, index) = resolve_body_mut(branch, &path).ok_or("Unknown branch path")?;
+        if index >= list.len() { return Err("Split index out of range".to_string()); }
+        let tail = list.split_off(index);
+        let new_id = uuid::Uuid::new_v4().simple().to_string();
+        mac.strands.push(Strand { id: new_id.clone(), x, y, instructions: tail });
+        s.invalid_field_buffers.clear();
+        auto_save(&s);
+        emit_state_updated(&app, &s);
+        return Ok(new_id);
+    }
     push_undo(&mut s);
     let mac = s.current_macro.as_mut().ok_or("No macro selected")?;
     let strand = mac.strand_mut(&strand_id).ok_or("Unknown strand")?;
@@ -2248,6 +2339,7 @@ pub(crate) fn merge_strand<R: Runtime>(
         return Err("Can't merge a strand into itself".to_string());
     }
     let mut s = state.lock().map_err(|e| e.to_string())?;
+    let value_branch_target = value_branch_target(&target_id)?;
     let mac_ref = s.current_macro.as_ref().ok_or("No macro selected")?;
     let dragged_ref = mac_ref
         .strand(&dragged_id)
@@ -2271,6 +2363,16 @@ pub(crate) fn merge_strand<R: Runtime>(
         .position(|s| s.id == dragged_id)
         .ok_or("Unknown dragged strand")?;
     let dragged = mac.strands.remove(dragged_pos);
+    if let Some(target) = value_branch_target {
+        let branch = resolve_value_branch_mut(mac, &target).ok_or("Unknown value branch")?;
+        let (list, index) = resolve_body_mut(branch, &path).ok_or("Unknown branch insertion point")?;
+        let index = index.min(list.len());
+        list.splice(index..index, dragged.instructions);
+        s.invalid_field_buffers.retain(|loc, _| loc.strand_id() != Some(dragged_id.as_str()));
+        auto_save(&s);
+        emit_state_updated(&app, &s);
+        return Ok(());
+    }
     let Some(target) = mac.strand_mut(&target_id) else {
         // Target vanished (e.g. concurrent edit) — put the dragged
         // strand back rather than silently dropping its instructions.
@@ -2714,6 +2816,28 @@ pub(crate) fn close_settings<R: Runtime>(
     s.combo_capture = None;
     s.pending_macro_hotkey = None;
     emit_state_updated(&app, &s);
+    Ok(())
+}
+
+// ─── View ────────────────────────────────────────────────────────────────────
+
+/// Resets every app webview's Chromium page zoom to 100%.
+///
+/// The frontend calls this directly from its own Ctrl/Cmd+0 keydown listener
+/// rather than relying on Chromium's `IDC_ZOOM_NORMAL` accelerator: the CEF
+/// runtime swallows that command unless the webview opts into
+/// `zoom_hotkeys_enabled`, and on macOS every webview is forced to Alloy
+/// style, which keeps no accelerator table at all. `set_zoom` dispatches
+/// straight to the runtime, so it works on all three.
+#[tauri::command]
+pub(crate) fn reset_zoom<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let windows = app.webview_windows();
+    if windows.is_empty() {
+        return Err("no app window".to_string());
+    }
+    for window in windows.values() {
+        window.set_zoom(1.0).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -3346,6 +3470,7 @@ mod value_location_tests {
             }],
             comments: vec![],
             variables: vec![],
+            lists: vec![],
             block_defs: vec![],
             settings: blockwork_core::macros::MacroSettings::default(),
         }
@@ -3763,6 +3888,7 @@ mod value_location_tests {
             floating_values: vec![],
             comments: vec![],
             variables: vec![],
+            lists: vec![],
             block_defs: vec![],
             settings: blockwork_core::macros::MacroSettings::default(),
         };
@@ -4016,6 +4142,7 @@ mod value_location_tests {
             instructions: vec![Instruction::new(InstructionKind::CallBlock {
                 block_id: id.clone(),
                 args: vec![Value::number(5.0)],
+                branches: vec![],
             })],
         });
         let old_pieces = mac.block_defs[0].pieces.clone();
@@ -4045,6 +4172,7 @@ mod value_location_tests {
             instructions: vec![Instruction::new(InstructionKind::CallBlock {
                 block_id: id.clone(),
                 args: vec![Value::number(1.0), Value::number(2.0)],
+                branches: vec![],
             })],
         });
         let old_pieces = mac.block_defs[0].pieces.clone();
@@ -4074,6 +4202,7 @@ mod value_location_tests {
             instructions: vec![Instruction::new(InstructionKind::CallBlock {
                 block_id: id.clone(),
                 args: vec![Value::number(5.0)],
+                branches: vec![],
             })],
         });
         let old_pieces = mac.block_defs[0].pieces.clone();
@@ -4103,6 +4232,7 @@ mod value_location_tests {
             instructions: vec![Instruction::new(InstructionKind::CallBlock {
                 block_id: id.clone(),
                 args: vec![Value::number(5.0)],
+                branches: vec![],
             })],
         });
         let old_pieces = mac.block_defs[0].pieces.clone();

@@ -8,9 +8,8 @@ use blockwork_core::input::{get_mouse_button_names, key_to_string, mouse_button_
 use blockwork_core::macros::backend::InputBackend;
 use blockwork_core::macros::thread_pool::ThreadPool;
 use blockwork_core::macros::{
-    BlockDef, BlockPiece, BlockShape, Comment, FloatingValue, InputValueType, Instruction,
-    InstructionKind, ListDef, ListItem, Macro, MacroSettings, Strand, VariableDef,
-    default_block_color,
+    default_block_color, BlockDef, BlockPiece, BlockShape, Comment, FloatingValue, InputValueType,
+    Instruction, InstructionKind, ListDef, ListItem, Macro, MacroSettings, Strand, VariableDef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -334,6 +333,10 @@ pub(crate) enum BlockPieceDto {
         #[serde(default)]
         value_type: InputValueType,
     },
+    Branch {
+        id: String,
+        name: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -365,10 +368,14 @@ pub(crate) struct ListDto {
 fn list_to_dto(list: &ListDef) -> ListDto {
     ListDto {
         name: list.name.clone(),
-        items: list.items.iter().map(|item| match item {
-            ListItem::Number(value) => ListItemDto::Number(*value),
-            ListItem::Text(value) => ListItemDto::Text(value.clone()),
-        }).collect(),
+        items: list
+            .items
+            .iter()
+            .map(|item| match item {
+                ListItem::Number(value) => ListItemDto::Number(*value),
+                ListItem::Text(value) => ListItemDto::Text(value.clone()),
+            })
+            .collect(),
         editor_visible: list.editor_visible,
         editor_x: list.editor_x,
         editor_y: list.editor_y,
@@ -397,6 +404,10 @@ pub(crate) fn block_piece_to_dto(piece: &BlockPiece) -> BlockPieceDto {
             name: name.clone(),
             value_type: *value_type,
         },
+        BlockPiece::Branch { id, name } => BlockPieceDto::Branch {
+            id: id.clone(),
+            name: name.clone(),
+        },
     }
 }
 
@@ -414,6 +425,10 @@ pub(crate) fn dto_to_block_piece(dto: &BlockPieceDto) -> BlockPiece {
             id: id.clone(),
             name: name.clone(),
             value_type: *value_type,
+        },
+        BlockPieceDto::Branch { id, name } => BlockPiece::Branch {
+            id: id.clone(),
+            name: name.clone(),
         },
     }
 }
@@ -466,6 +481,7 @@ pub(crate) enum ValueDto {
     Call {
         block_id: String,
         args: Vec<ValueDto>,
+        branches: Vec<Vec<InstructionDto>>,
         saved: Box<ValueDto>,
     },
 }
@@ -693,13 +709,41 @@ pub(crate) enum InstructionDto {
         name: String,
         value: ValueDto,
     },
-    AddToList { id: String, value: ValueDto, name: String },
-    DeleteOfList { id: String, index: ValueDto, name: String },
-    DeleteAllOfList { id: String, name: String },
-    ShiftList { id: String, name: String, amount: ValueDto },
-    InsertIntoList { id: String, value: ValueDto, index: ValueDto, name: String },
-    ReplaceItemOfList { id: String, index: ValueDto, name: String, value: ValueDto },
-    ReverseList { id: String, name: String },
+    AddToList {
+        id: String,
+        value: ValueDto,
+        name: String,
+    },
+    DeleteOfList {
+        id: String,
+        index: ValueDto,
+        name: String,
+    },
+    DeleteAllOfList {
+        id: String,
+        name: String,
+    },
+    ShiftList {
+        id: String,
+        name: String,
+        amount: ValueDto,
+    },
+    InsertIntoList {
+        id: String,
+        value: ValueDto,
+        index: ValueDto,
+        name: String,
+    },
+    ReplaceItemOfList {
+        id: String,
+        index: ValueDto,
+        name: String,
+        value: ValueDto,
+    },
+    ReverseList {
+        id: String,
+        name: String,
+    },
     BlockHeader {
         id: String,
         block_id: String,
@@ -708,6 +752,16 @@ pub(crate) enum InstructionDto {
         id: String,
         block_id: String,
         args: Vec<ValueDto>,
+    },
+    BranchCallBlock {
+        id: String,
+        block_id: String,
+        args: Vec<ValueDto>,
+        branches: Vec<Vec<InstructionDto>>,
+    },
+    RunBranch {
+        id: String,
+        name: String,
     },
     Return {
         id: String,
@@ -890,10 +944,12 @@ pub(crate) fn value_to_dto(value: &Value) -> ValueDto {
         Value::Call {
             block_id,
             args,
+            branches,
             saved,
         } => ValueDto::Call {
             block_id: block_id.clone(),
             args: args.iter().map(value_to_dto).collect(),
+            branches: branches.iter().map(|branch| branch.iter().map(instruction_to_dto).collect()).collect(),
             saved: Box::new(value_to_dto(saved)),
         },
     }
@@ -916,10 +972,12 @@ pub(crate) fn dto_to_value(dto: &ValueDto) -> Value {
         ValueDto::Call {
             block_id,
             args,
+            branches,
             saved,
         } => Value::Call {
             block_id: block_id.clone(),
             args: args.iter().map(dto_to_value).collect(),
+            branches: branches.iter().map(|branch| branch.iter().filter_map(dto_to_instruction).collect()).collect(),
             saved: Box::new(dto_to_value(saved)),
         },
     }
@@ -987,21 +1045,72 @@ pub(crate) fn instruction_to_dto(ins: &Instruction) -> InstructionDto {
             name: name.clone(),
             value: value_to_dto(value),
         },
-        InstructionKind::AddToList { value, name } => InstructionDto::AddToList { id, value: value_to_dto(value), name: name.clone() },
-        InstructionKind::DeleteOfList { index, name } => InstructionDto::DeleteOfList { id, index: value_to_dto(index), name: name.clone() },
-        InstructionKind::DeleteAllOfList { name } => InstructionDto::DeleteAllOfList { id, name: name.clone() },
-        InstructionKind::ShiftList { name, amount } => InstructionDto::ShiftList { id, name: name.clone(), amount: value_to_dto(amount) },
-        InstructionKind::InsertIntoList { value, index, name } => InstructionDto::InsertIntoList { id, value: value_to_dto(value), index: value_to_dto(index), name: name.clone() },
-        InstructionKind::ReplaceItemOfList { index, name, value } => InstructionDto::ReplaceItemOfList { id, index: value_to_dto(index), name: name.clone(), value: value_to_dto(value) },
-        InstructionKind::ReverseList { name } => InstructionDto::ReverseList { id, name: name.clone() },
+        InstructionKind::AddToList { value, name } => InstructionDto::AddToList {
+            id,
+            value: value_to_dto(value),
+            name: name.clone(),
+        },
+        InstructionKind::DeleteOfList { index, name } => InstructionDto::DeleteOfList {
+            id,
+            index: value_to_dto(index),
+            name: name.clone(),
+        },
+        InstructionKind::DeleteAllOfList { name } => InstructionDto::DeleteAllOfList {
+            id,
+            name: name.clone(),
+        },
+        InstructionKind::ShiftList { name, amount } => InstructionDto::ShiftList {
+            id,
+            name: name.clone(),
+            amount: value_to_dto(amount),
+        },
+        InstructionKind::InsertIntoList { value, index, name } => InstructionDto::InsertIntoList {
+            id,
+            value: value_to_dto(value),
+            index: value_to_dto(index),
+            name: name.clone(),
+        },
+        InstructionKind::ReplaceItemOfList { index, name, value } => {
+            InstructionDto::ReplaceItemOfList {
+                id,
+                index: value_to_dto(index),
+                name: name.clone(),
+                value: value_to_dto(value),
+            }
+        }
+        InstructionKind::ReverseList { name } => InstructionDto::ReverseList {
+            id,
+            name: name.clone(),
+        },
         InstructionKind::BlockHeader(block_id) => InstructionDto::BlockHeader {
             id,
             block_id: block_id.clone(),
         },
-        InstructionKind::CallBlock { block_id, args } => InstructionDto::CallBlock {
+        InstructionKind::CallBlock {
+            block_id,
+            args,
+            branches,
+        } if branches.is_empty() => InstructionDto::CallBlock {
             id,
             block_id: block_id.clone(),
             args: args.iter().map(value_to_dto).collect(),
+        },
+        InstructionKind::CallBlock {
+            block_id,
+            args,
+            branches,
+        } => InstructionDto::BranchCallBlock {
+            id,
+            block_id: block_id.clone(),
+            args: args.iter().map(value_to_dto).collect(),
+            branches: branches
+                .iter()
+                .map(|branch| branch.iter().map(instruction_to_dto).collect())
+                .collect(),
+        },
+        InstructionKind::RunBranch(name) => InstructionDto::RunBranch {
+            id,
+            name: name.clone(),
         },
         InstructionKind::Return(value) => InstructionDto::Return {
             id,
@@ -1172,13 +1281,59 @@ pub(crate) fn dto_to_instruction(dto: &InstructionDto) -> Option<Instruction> {
             id,
             InstructionKind::ChangeVariable(name.clone(), dto_to_value(value)),
         ),
-        InstructionDto::AddToList { id, value, name } => (id, InstructionKind::AddToList { value: dto_to_value(value), name: name.clone() }),
-        InstructionDto::DeleteOfList { id, index, name } => (id, InstructionKind::DeleteOfList { index: dto_to_value(index), name: name.clone() }),
-        InstructionDto::DeleteAllOfList { id, name } => (id, InstructionKind::DeleteAllOfList { name: name.clone() }),
-        InstructionDto::ShiftList { id, name, amount } => (id, InstructionKind::ShiftList { name: name.clone(), amount: dto_to_value(amount) }),
-        InstructionDto::InsertIntoList { id, value, index, name } => (id, InstructionKind::InsertIntoList { value: dto_to_value(value), index: dto_to_value(index), name: name.clone() }),
-        InstructionDto::ReplaceItemOfList { id, index, name, value } => (id, InstructionKind::ReplaceItemOfList { index: dto_to_value(index), name: name.clone(), value: dto_to_value(value) }),
-        InstructionDto::ReverseList { id, name } => (id, InstructionKind::ReverseList { name: name.clone() }),
+        InstructionDto::AddToList { id, value, name } => (
+            id,
+            InstructionKind::AddToList {
+                value: dto_to_value(value),
+                name: name.clone(),
+            },
+        ),
+        InstructionDto::DeleteOfList { id, index, name } => (
+            id,
+            InstructionKind::DeleteOfList {
+                index: dto_to_value(index),
+                name: name.clone(),
+            },
+        ),
+        InstructionDto::DeleteAllOfList { id, name } => {
+            (id, InstructionKind::DeleteAllOfList { name: name.clone() })
+        }
+        InstructionDto::ShiftList { id, name, amount } => (
+            id,
+            InstructionKind::ShiftList {
+                name: name.clone(),
+                amount: dto_to_value(amount),
+            },
+        ),
+        InstructionDto::InsertIntoList {
+            id,
+            value,
+            index,
+            name,
+        } => (
+            id,
+            InstructionKind::InsertIntoList {
+                value: dto_to_value(value),
+                index: dto_to_value(index),
+                name: name.clone(),
+            },
+        ),
+        InstructionDto::ReplaceItemOfList {
+            id,
+            index,
+            name,
+            value,
+        } => (
+            id,
+            InstructionKind::ReplaceItemOfList {
+                index: dto_to_value(index),
+                name: name.clone(),
+                value: dto_to_value(value),
+            },
+        ),
+        InstructionDto::ReverseList { id, name } => {
+            (id, InstructionKind::ReverseList { name: name.clone() })
+        }
         InstructionDto::BlockHeader { id, block_id } => {
             (id, InstructionKind::BlockHeader(block_id.clone()))
         }
@@ -1187,8 +1342,31 @@ pub(crate) fn dto_to_instruction(dto: &InstructionDto) -> Option<Instruction> {
             InstructionKind::CallBlock {
                 block_id: block_id.clone(),
                 args: args.iter().map(dto_to_value).collect(),
+                branches: vec![],
             },
         ),
+        InstructionDto::BranchCallBlock {
+            id,
+            block_id,
+            args,
+            branches,
+        } => (
+            id,
+            InstructionKind::CallBlock {
+                block_id: block_id.clone(),
+                args: args.iter().map(dto_to_value).collect(),
+                branches: branches
+                    .iter()
+                    .map(|branch| {
+                        branch
+                            .iter()
+                            .map(dto_to_instruction)
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            },
+        ),
+        InstructionDto::RunBranch { id, name } => (id, InstructionKind::RunBranch(name.clone())),
         InstructionDto::Return { id, value } => (id, InstructionKind::Return(dto_to_value(value))),
         InstructionDto::If {
             id,
@@ -1395,10 +1573,10 @@ pub(crate) fn build_state_dto(s: &AppState) -> StateDto {
                     .or_else(|| Some("(deleted)".to_string()))
             } else {
                 None
-        };
-        HotkeyBindingDto {
-            binding_index: i,
-            action: hotkey_action_to_dto(&b.action),
+            };
+            HotkeyBindingDto {
+                binding_index: i,
+                action: hotkey_action_to_dto(&b.action),
                 combo_display: b.combo.format(),
                 macro_name,
             }

@@ -338,6 +338,7 @@ pub fn run() {
             commands::toggle_record_mouse_movement,
             commands::open_settings,
             commands::close_settings,
+            commands::reset_zoom,
             commands::start_combo_capture,
             commands::start_pending_combo_capture,
             commands::combo_capture_event,

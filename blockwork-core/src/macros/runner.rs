@@ -22,6 +22,7 @@ pub type ListStore = Arc<Mutex<HashMap<String, Vec<ListItem>>>>;
 /// per run and shared read-only via `ExecCtx::block_table`.
 pub struct BlockRuntime {
     pub input_names: Vec<String>,
+    pub branch_names: Vec<String>,
     pub body: Vec<Instruction>,
 }
 
@@ -67,6 +68,7 @@ struct ExecCtx<'a> {
     /// leaves the button physically stuck down for the rest of the session.
     pressed_buttons: &'a mut Vec<MacroButton>,
     param_env: HashMap<String, Evaluated>,
+    branch_env: HashMap<String, Vec<Instruction>>,
 }
 
 fn is_list_reporter(op: Op) -> bool {
@@ -165,6 +167,7 @@ pub fn resolve_list_reporters(
         Value::Call {
             block_id,
             args,
+            branches,
             saved,
         } => Ok(Value::Call {
             block_id: block_id.clone(),
@@ -172,6 +175,7 @@ pub fn resolve_list_reporters(
                 .iter()
                 .map(|arg| resolve_list_reporters(arg, lists))
                 .collect::<Result<Vec<_>, _>>()?,
+            branches: branches.clone(),
             saved: saved.clone(),
         }),
         _ => Ok(value.clone()),
@@ -232,7 +236,7 @@ fn resolve_calls_and_params(value: &Value, ctx: &mut ExecCtx, depth: u32) -> Res
                 saved: saved.clone(),
             })
         }
-        Value::Call { block_id, args, .. } => {
+        Value::Call { block_id, args, branches, .. } => {
             // Args evaluate in the caller's scope, fully resolved to
             // concrete values before call_block swaps in the callee's scope.
             let mut evaluated_args = Vec::with_capacity(args.len());
@@ -240,7 +244,7 @@ fn resolve_calls_and_params(value: &Value, ctx: &mut ExecCtx, depth: u32) -> Res
                 let resolved = resolve_calls_and_params(a, ctx, depth)?;
                 evaluated_args.push(resolved.eval()?);
             }
-            match call_block(block_id, evaluated_args, ctx, depth + 1)? {
+            match call_block(block_id, evaluated_args, branches.clone(), ctx, depth + 1)? {
                 Some(e) => Ok(e.into_value()),
                 None => Err(format!("custom block '{block_id}' didn't return a value")),
             }
@@ -255,6 +259,7 @@ fn resolve_calls_and_params(value: &Value, ctx: &mut ExecCtx, depth: u32) -> Res
 fn call_block(
     block_id: &str,
     arg_values: Vec<Evaluated>,
+    branch_values: Vec<Vec<Instruction>>,
     ctx: &mut ExecCtx,
     depth: u32,
 ) -> Result<Option<Evaluated>, String> {
@@ -273,9 +278,17 @@ fn call_block(
         .cloned()
         .zip(arg_values)
         .collect();
+    let new_branches: HashMap<String, Vec<Instruction>> = runtime
+        .branch_names
+        .iter()
+        .cloned()
+        .zip(branch_values)
+        .collect();
     let saved_env = std::mem::replace(&mut ctx.param_env, new_env);
+    let saved_branches = std::mem::replace(&mut ctx.branch_env, new_branches);
     let result = run_block(&runtime.body, ctx, depth, Instant::now());
     ctx.param_env = saved_env;
+    ctx.branch_env = saved_branches;
     // A stray Break/Continue reaching a custom block's own top level (no
     // enclosing loop within its body) is absorbed here, same as Normal —
     // a custom block is its own execution context, not an extension of the
@@ -423,8 +436,25 @@ impl Macro {
                     if let Some(def) = block_defs.iter().find(|b| &b.id == id) {
                         let input_names: Vec<String> =
                             def.input_names().map(str::to_string).collect();
+                        let branch_names: Vec<String> = def
+                            .pieces
+                            .iter()
+                            .filter_map(|piece| match piece {
+                                crate::macros::BlockPiece::Branch { name, .. } => {
+                                    Some(name.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect();
                         let body = strand.instructions[1..].to_vec();
-                        block_table.insert(id.clone(), BlockRuntime { input_names, body });
+                        block_table.insert(
+                            id.clone(),
+                            BlockRuntime {
+                                input_names,
+                                branch_names,
+                                body,
+                            },
+                        );
                     }
                 }
                 Some(InstructionKind::WhenRan) => entry_strands.push(strand.instructions),
@@ -534,6 +564,7 @@ fn run_strand(
             pressed_keys: &mut pressed_keys,
             pressed_buttons: &mut pressed_buttons,
             param_env: HashMap::new(),
+            branch_env: HashMap::new(),
         };
         let _ = run_block(&instructions, &mut ctx, 0, start);
     }
@@ -682,7 +713,11 @@ fn run_block(
             }
             InstructionKind::EscapeLoop => return Ok(Flow::Break),
             InstructionKind::ContinueLoop => return Ok(Flow::Continue),
-            InstructionKind::CallBlock { block_id, args } => {
+            InstructionKind::CallBlock {
+                block_id,
+                args,
+                branches,
+            } => {
                 let mut evaluated_args = Vec::with_capacity(args.len());
                 for a in args {
                     match ctx.resolve(a, depth).and_then(|v| v.eval()) {
@@ -696,7 +731,15 @@ fn run_block(
                 // A non-reporter (`Normal`/`Ending`) block's body normally
                 // has no `Return`; if one sneaks in, it just ends the call
                 // early.
-                let _ = call_block(block_id, evaluated_args, ctx, depth + 1)?;
+                let _ = call_block(block_id, evaluated_args, branches.clone(), ctx, depth + 1)?;
+            }
+            InstructionKind::RunBranch(name) => {
+                if let Some(body) = ctx.branch_env.get(name).cloned() {
+                    let flow = run_block(&body, ctx, depth, Instant::now())?;
+                    if flow != Flow::Normal {
+                        return Ok(flow);
+                    }
+                }
             }
             InstructionKind::If { condition, body } => {
                 match ctx.resolve(condition, depth).and_then(|v| v.eval()) {
@@ -1706,6 +1749,7 @@ mod tests {
             Value::Call {
                 block_id: "double".to_string(),
                 args: vec![Value::number(21.0)],
+                branches: vec![],
                 saved: Box::new(Value::number(0.0)),
             },
         ))]);
@@ -1713,6 +1757,65 @@ mod tests {
         assert_eq!(
             vars.lock().unwrap().get("x"),
             Some(&Evaluated::Number(42.0))
+        );
+    }
+
+    #[test]
+    fn custom_block_runs_the_callback_supplied_to_its_branch() {
+        let vars = empty_vars();
+        let block_id = "with_branch".to_string();
+        let mac = Macro {
+            id: "m".into(),
+            name: "Branches".into(),
+            description: "".into(),
+            strands: vec![
+                Strand {
+                    id: "caller".into(),
+                    x: 0,
+                    y: 0,
+                    instructions: vec![
+                        Instruction::new(InstructionKind::WhenRan),
+                        Instruction::new(InstructionKind::CallBlock {
+                            block_id: block_id.clone(),
+                            args: vec![],
+                            branches: vec![vec![Instruction::new(InstructionKind::SetVariable(
+                                "ran".into(),
+                                Value::number(1.0),
+                            ))]],
+                        }),
+                    ],
+                },
+                Strand {
+                    id: "body".into(),
+                    x: 0,
+                    y: 0,
+                    instructions: vec![
+                        Instruction::new(InstructionKind::BlockHeader(block_id.clone())),
+                        Instruction::new(InstructionKind::RunBranch("callback".into())),
+                    ],
+                },
+            ],
+            recording_target: None,
+            speed_multiplier: 1.0,
+            floating_values: vec![],
+            comments: vec![],
+            variables: vec![],
+            lists: vec![],
+            block_defs: vec![BlockDef {
+                id: block_id,
+                pieces: vec![BlockPiece::Branch {
+                    id: "b1".into(),
+                    name: "callback".into(),
+                }],
+                shape: BlockShape::Normal,
+                color: default_block_color(),
+            }],
+            settings: crate::macros::MacroSettings::default(),
+        };
+        mac.run(noop_emulator(), None, 1.0, Arc::clone(&vars));
+        assert_eq!(
+            vars.lock().unwrap().get("ran"),
+            Some(&Evaluated::Number(1.0))
         );
     }
 
@@ -1739,6 +1842,7 @@ mod tests {
                             Value::Call {
                                 block_id: block_id.clone(),
                                 args: vec![],
+                                branches: vec![],
                                 saved: Box::new(Value::number(0.0)),
                             },
                         )),
@@ -1790,6 +1894,7 @@ mod tests {
                         Instruction::new(InstructionKind::CallBlock {
                             block_id: block_id.clone(),
                             args: vec![],
+                            branches: vec![],
                         }),
                     ],
                 },
@@ -1847,6 +1952,7 @@ mod tests {
                             Value::Call {
                                 block_id: block_id.clone(),
                                 args: vec![],
+                                branches: vec![],
                                 saved: Box::new(Value::number(0.0)),
                             },
                         )),
@@ -1861,6 +1967,7 @@ mod tests {
                         Instruction::new(InstructionKind::Return(Value::Call {
                             block_id: block_id.clone(),
                             args: vec![],
+                            branches: vec![],
                             saved: Box::new(Value::number(0.0)),
                         })),
                     ],
@@ -1910,6 +2017,7 @@ mod tests {
                             Value::Call {
                                 block_id: triple_id.clone(),
                                 args: vec![Value::number(2.0)],
+                                branches: vec![],
                                 saved: Box::new(Value::number(0.0)),
                             },
                         )),
@@ -1941,6 +2049,7 @@ mod tests {
                                 Value::Call {
                                     block_id: double_id.clone(),
                                     args: vec![Value::Param { name: "n".into() }],
+                                    branches: vec![],
                                     saved: Box::new(Value::number(0.0)),
                                 },
                                 Value::Param { name: "n".into() },
@@ -2148,6 +2257,7 @@ mod tests {
                             Value::Call {
                                 block_id: block_id.clone(),
                                 args: vec![],
+                                branches: vec![],
                                 saved: Box::new(Value::number(0.0)),
                             },
                         )),
@@ -2415,6 +2525,7 @@ mod tests {
                             Value::Call {
                                 block_id: block_id.clone(),
                                 args: vec![],
+                                branches: vec![],
                                 saved: Box::new(Value::number(0.0)),
                             },
                         )),

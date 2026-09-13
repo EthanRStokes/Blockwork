@@ -92,7 +92,7 @@ export type ValueDto =
   | { kind: 'Op'; op: ValueOp; args: ValueDto[]; saved: ValueDto }
   | { kind: 'Var'; name: string }
   | { kind: 'Param'; name: string }
-  | { kind: 'Call'; block_id: string; args: ValueDto[]; saved: ValueDto };
+  | { kind: 'Call'; block_id: string; args: ValueDto[]; branches: InstructionDto[][]; saved: ValueDto };
 
 /** Literal-only list item. Lists never store expressions, booleans, or refs. */
 export type ListItemDto = { kind: 'Number'; value: number } | { kind: 'Text'; value: string };
@@ -145,7 +145,7 @@ export function defaultValueForKind(kind: ValueKind): ValueDto {
   if (kind.startsWith('Param:')) return { kind: 'Param', name: parseParamKind(kind).name };
   // Normally blockDefs.ts's paletteCallValueFor handles `Call:` (it needs the
   // block's input count); this is just a safe zero-arg fallback.
-  if (kind.startsWith('Call:')) return { kind: 'Call', block_id: kind.slice('Call:'.length), args: [], saved: numberValue(0) };
+  if (kind.startsWith('Call:')) return { kind: 'Call', block_id: kind.slice('Call:'.length), args: [], branches: [], saved: numberValue(0) };
   const spec = specForKind(kind);
   if (!spec) throw new Error(`Unknown value kind: ${kind}`);
   return { kind: 'Op', op: spec.op, args: Array.from({ length: spec.arity }, (_, i) => defaultArgFor(spec, i)), saved: numberValue(0) };
@@ -255,6 +255,8 @@ export type InstructionDto = { id: string } & (
   | { type: 'ReverseList'; name: string }
   | { type: 'BlockHeader'; block_id: string }
   | { type: 'CallBlock'; block_id: string; args: ValueDto[] }
+  | { type: 'BranchCallBlock'; block_id: string; args: ValueDto[]; branches: InstructionDto[][] }
+  | { type: 'RunBranch'; name: string }
   | { type: 'Return'; value: ValueDto }
   | { type: 'If'; condition: ValueDto; body: InstructionDto[] }
   | { type: 'IfElse'; condition: ValueDto; then_body: InstructionDto[]; else_body: InstructionDto[] }
@@ -305,6 +307,8 @@ export function defaultInstruction(type: InstructionType): InstructionDto {
     case 'ReverseList': return { id, type: 'ReverseList', name: '' };
     case 'BlockHeader': return { id, type: 'BlockHeader', block_id: '' };
     case 'CallBlock': return { id, type: 'CallBlock', block_id: '', args: [] };
+    case 'BranchCallBlock': return { id, type: 'BranchCallBlock', block_id: '', args: [], branches: [] };
+    case 'RunBranch': return { id, type: 'RunBranch', name: '' };
     case 'Return': return { id, type: 'Return', value: numberValue(0) };
     case 'If': return { id, type: 'If', condition: blankBoolValue(), body: [] };
     case 'IfElse': return { id, type: 'IfElse', condition: blankBoolValue(), then_body: [], else_body: [] };
@@ -439,7 +443,8 @@ export type InputValueType = 'Any' | 'Bool';
 // added" when reconciling call sites' args on edit_block.
 export type BlockPieceDto =
   | { kind: 'Label'; id: string; text: string }
-  | { kind: 'Input'; id: string; name: string; value_type: InputValueType };
+  | { kind: 'Input'; id: string; name: string; value_type: InputValueType }
+  | { kind: 'Branch'; id: string; name: string };
 
 // What a custom block's own call site looks like — 'Normal' (a plain
 // stackable instruction), 'Ending' (stackable, but nothing can be placed
@@ -467,6 +472,10 @@ export interface BlockDefDto {
  * `CallBlock`/`Value.Call`'s `args` line up against. */
 export function blockInputPieces(def: BlockDefDto): Extract<BlockPieceDto, { kind: 'Input' }>[] {
   return def.pieces.filter((p): p is Extract<BlockPieceDto, { kind: 'Input' }> => p.kind === 'Input');
+}
+
+export function blockBranchPieces(def: BlockDefDto): Extract<BlockPieceDto, { kind: 'Branch' }>[] {
+  return def.pieces.filter((p): p is Extract<BlockPieceDto, { kind: 'Branch' }> => p.kind === 'Branch');
 }
 
 /** A block's declared input names, in prototype order — see `blockInputPieces`. */

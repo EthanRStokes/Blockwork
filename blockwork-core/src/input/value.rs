@@ -120,7 +120,7 @@ pub enum Value {
     /// Value-position invocation of a `ReturnsValue`/`ReturnsBool`-shaped custom block —
     /// mirrors `Op`'s shape (including `saved`) but names a block instead of
     /// a fixed [`Op`]. Resolved before `eval` sees it, like `Var`/`Param`.
-    Call { block_id: String, args: Vec<Value>, saved: Box<Value> },
+    Call { block_id: String, args: Vec<Value>, #[serde(default)] branches: Vec<Vec<crate::macros::Instruction>>, saved: Box<Value> },
 }
 
 /// Result of evaluating a [`Value`] tree — a number or text. Also doubles as
@@ -574,7 +574,7 @@ impl Value {
                 }
                 saved.for_each_call_args_mut(block_id, f);
             }
-            Value::Call { block_id: id, args, saved } => {
+            Value::Call { block_id: id, args, saved, .. } => {
                 if id == block_id {
                     f(args);
                 }
@@ -598,7 +598,7 @@ impl Value {
                 }
                 saved.scrub_block_calls(block_id);
             }
-            Value::Call { block_id: id, args, saved } => {
+            Value::Call { block_id: id, args, saved, .. } => {
                 if id == block_id {
                     *self = Value::number(0.0);
                 } else {
@@ -668,9 +668,10 @@ impl Value {
             // module doesn't have; only their nested `args` (which may
             // contain `Var` reads) get recursed into.
             Value::Param { name } => Value::Param { name: name.clone() },
-            Value::Call { block_id, args, saved } => Value::Call {
+            Value::Call { block_id, args, branches, saved } => Value::Call {
                 block_id: block_id.clone(),
                 args: args.iter().map(|a| a.resolve_vars(env)).collect(),
+                branches: branches.clone(),
                 saved: Box::new(saved.resolve_vars(env)),
             },
         }
@@ -707,10 +708,11 @@ impl std::hash::Hash for Value {
                 4u8.hash(state);
                 name.hash(state);
             }
-            Value::Call { block_id, args, saved } => {
+            Value::Call { block_id, args, branches, saved } => {
                 5u8.hash(state);
                 block_id.hash(state);
                 args.hash(state);
+                branches.hash(state);
                 saved.hash(state);
             }
         }
@@ -749,6 +751,7 @@ impl<'de> Deserialize<'de> for Value {
             Call {
                 block_id: String,
                 args: Vec<Value>,
+                #[serde(default)] branches: Vec<Vec<crate::macros::Instruction>>,
                 #[serde(default = "default_saved")]
                 saved: Box<Value>,
             },
@@ -787,7 +790,7 @@ impl<'de> Deserialize<'de> for Value {
             ValueDe::Current(Tagged::Op { op, args, saved }) => Value::Op { op, args, saved },
             ValueDe::Current(Tagged::Var { name }) => Value::Var { name },
             ValueDe::Current(Tagged::Param { name }) => Value::Param { name },
-            ValueDe::Current(Tagged::Call { block_id, args, saved }) => Value::Call { block_id, args, saved },
+            ValueDe::Current(Tagged::Call { block_id, args, branches, saved }) => Value::Call { block_id, args, branches, saved },
             ValueDe::Current(Tagged::BinaryOp { op, lhs, rhs, saved }) => Value::Op { op, args: vec![*lhs, *rhs], saved },
             ValueDe::Current(Tagged::Join { args, saved }) => Value::Op { op: Op::Join, args, saved },
         })
