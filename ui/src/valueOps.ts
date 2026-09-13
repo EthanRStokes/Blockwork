@@ -122,6 +122,12 @@ export const OPERATOR_KINDS: OperatorKindSpec[] = [
   // Zero-arity, like NewLine/Tab — evaluates to the live system battery percentage.
   { kind: 'BatteryPercentage', op: 'BatteryPercentage', arity: 0, argTypes: [], resultType: 'number', prefix: 'battery percentage' },
   { kind: 'PluggedIn', op: 'PluggedIn', arity: 0, argTypes: [], resultType: 'bool', prefix: 'plugged in' },
+  // Zero-arity, like BatteryPercentage — evaluates to the live clipboard text.
+  { kind: 'ClipboardText', op: 'ClipboardText', arity: 0, argTypes: [], resultType: 'text', prefix: 'clipboard text' },
+  // Zero-arity, like PluggedIn — evaluates to whether the clipboard currently
+  // holds image data or a file list, respectively.
+  { kind: 'ClipboardHasImage', op: 'ClipboardHasImage', arity: 0, argTypes: [], resultType: 'bool', prefix: 'clipboard has image' },
+  { kind: 'ClipboardHasFiles', op: 'ClipboardHasFiles', arity: 0, argTypes: [], resultType: 'bool', prefix: 'clipboard has files' },
   // One arg, entirely a fixed dropdown (no draggable operand) — same enumArg
   // shape as Case, just with nothing else alongside it.
   { kind: 'CurrentTime', op: 'CurrentTime', arity: 1, argTypes: ['text'], resultType: 'number', prefix: 'current', enumArg: { index: 0, options: CURRENT_TIME_OPTIONS } },

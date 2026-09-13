@@ -1338,6 +1338,7 @@ fn value_slot_mut(ins: &mut Instruction, field: FieldId) -> Option<&mut Value> {
         (InstructionKind::Return(v), FieldId::ReturnValue) => Some(v),
         (InstructionKind::CallBlock { args, .. }, FieldId::CallArg(i)) => args.get_mut(i),
         (InstructionKind::ChangeVariable(_, v), FieldId::ChangeVariableValue) => Some(v),
+        (InstructionKind::SetClipboard(v), FieldId::SetClipboardValue) => Some(v),
         (InstructionKind::AddToList { value, .. }, FieldId::AddToListValue) => Some(value),
         (InstructionKind::DeleteOfList { index, .. }, FieldId::DeleteOfListIndex) => Some(index),
         (InstructionKind::ShiftList { amount, .. }, FieldId::ShiftListAmount) => Some(amount),

@@ -43,6 +43,7 @@ pub(crate) enum FieldId {
     TextValue,
     SetVariableValue,
     ChangeVariableValue,
+    SetClipboardValue,
     AddToListValue,
     DeleteOfListIndex,
     ShiftListAmount,
@@ -74,6 +75,7 @@ impl std::fmt::Display for FieldId {
             FieldId::TextValue => write!(f, "TextValue"),
             FieldId::SetVariableValue => write!(f, "SetVariableValue"),
             FieldId::ChangeVariableValue => write!(f, "ChangeVariableValue"),
+            FieldId::SetClipboardValue => write!(f, "SetClipboardValue"),
             FieldId::AddToListValue => write!(f, "AddToListValue"),
             FieldId::DeleteOfListIndex => write!(f, "DeleteOfListIndex"),
             FieldId::ShiftListAmount => write!(f, "ShiftListAmount"),
@@ -102,6 +104,7 @@ impl std::str::FromStr for FieldId {
             "TextValue" => Ok(FieldId::TextValue),
             "SetVariableValue" => Ok(FieldId::SetVariableValue),
             "ChangeVariableValue" => Ok(FieldId::ChangeVariableValue),
+            "SetClipboardValue" => Ok(FieldId::SetClipboardValue),
             "AddToListValue" => Ok(FieldId::AddToListValue),
             "DeleteOfListIndex" => Ok(FieldId::DeleteOfListIndex),
             "ShiftListAmount" => Ok(FieldId::ShiftListAmount),
@@ -687,6 +690,9 @@ pub(crate) enum InstructionDto {
     WhenPowerUnplugged {
         id: String,
     },
+    WhenClipboardChanged {
+        id: String,
+    },
     OpenApp {
         id: String,
         command: String,
@@ -707,6 +713,10 @@ pub(crate) enum InstructionDto {
     ChangeVariable {
         id: String,
         name: String,
+        value: ValueDto,
+    },
+    SetClipboard {
+        id: String,
         value: ValueDto,
     },
     AddToList {
@@ -1015,6 +1025,7 @@ pub(crate) fn instruction_to_dto(ins: &Instruction) -> InstructionDto {
         },
         InstructionKind::WhenPowerPluggedIn => InstructionDto::WhenPowerPluggedIn { id },
         InstructionKind::WhenPowerUnplugged => InstructionDto::WhenPowerUnplugged { id },
+        InstructionKind::WhenClipboardChanged => InstructionDto::WhenClipboardChanged { id },
         InstructionKind::OpenApp {
             command,
             name,
@@ -1043,6 +1054,10 @@ pub(crate) fn instruction_to_dto(ins: &Instruction) -> InstructionDto {
         InstructionKind::ChangeVariable(name, value) => InstructionDto::ChangeVariable {
             id,
             name: name.clone(),
+            value: value_to_dto(value),
+        },
+        InstructionKind::SetClipboard(value) => InstructionDto::SetClipboard {
+            id,
             value: value_to_dto(value),
         },
         InstructionKind::AddToList { value, name } => InstructionDto::AddToList {
@@ -1247,6 +1262,7 @@ pub(crate) fn dto_to_instruction(dto: &InstructionDto) -> Option<Instruction> {
         InstructionDto::WhenTime { id, schedule } => (id, InstructionKind::WhenTime(*schedule)),
         InstructionDto::WhenPowerPluggedIn { id } => (id, InstructionKind::WhenPowerPluggedIn),
         InstructionDto::WhenPowerUnplugged { id } => (id, InstructionKind::WhenPowerUnplugged),
+        InstructionDto::WhenClipboardChanged { id } => (id, InstructionKind::WhenClipboardChanged),
         InstructionDto::OpenApp {
             id,
             command,
@@ -1280,6 +1296,10 @@ pub(crate) fn dto_to_instruction(dto: &InstructionDto) -> Option<Instruction> {
         InstructionDto::ChangeVariable { id, name, value } => (
             id,
             InstructionKind::ChangeVariable(name.clone(), dto_to_value(value)),
+        ),
+        InstructionDto::SetClipboard { id, value } => (
+            id,
+            InstructionKind::SetClipboard(dto_to_value(value)),
         ),
         InstructionDto::AddToList { id, value, name } => (
             id,

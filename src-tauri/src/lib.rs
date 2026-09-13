@@ -1,4 +1,5 @@
 pub(crate) mod battery_watch;
+pub(crate) mod clipboard_watch;
 pub(crate) mod commands;
 #[cfg(feature = "dev-bridge")]
 pub(crate) mod dev_bridge;
@@ -241,6 +242,9 @@ pub fn run() {
 
             // ── Background time-event watcher (see src/time_watch.rs) ──────
             time_watch::start(Arc::clone(&shared), app.handle().clone());
+
+            // ── Background clipboard-event watcher (see src/clipboard_watch.rs) ──
+            clipboard_watch::start(Arc::clone(&shared), app.handle().clone());
 
             // ── QueueSignal consumer (replaces iced hotkey subscription) ──
             let app_handle = app.handle().clone();

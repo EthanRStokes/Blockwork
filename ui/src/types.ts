@@ -69,6 +69,11 @@ export type ValueOp =
   // Zero-arity boolean — whether the system is currently on external power
   // (always true with no battery/UPS present).
   | 'PluggedIn'
+  // Zero-arity — the live clipboard contents as text.
+  | 'ClipboardText'
+  // Zero-arity booleans — whether the clipboard currently holds image data
+  // or a file list, respectively.
+  | 'ClipboardHasImage' | 'ClipboardHasFiles'
   // One fixed-dropdown arg (year/month/date/day of week/hour/minute/second)
   // — always numeric, see timeSchedule.ts's CURRENT_TIME_OPTIONS.
   | 'CurrentTime'
@@ -242,10 +247,12 @@ export type InstructionDto = { id: string } & (
   | { type: 'WhenTime'; schedule: TimeScheduleDto }
   | { type: 'WhenPowerPluggedIn' }
   | { type: 'WhenPowerUnplugged' }
+  | { type: 'WhenClipboardChanged' }
   | { type: 'OpenApp'; command: string; name: string; icon: string | null }
   | { type: 'CloseApp'; command: string; name: string; icon: string | null }
   | { type: 'SetVariable'; name: string; value: ValueDto }
   | { type: 'ChangeVariable'; name: string; value: ValueDto }
+  | { type: 'SetClipboard'; value: ValueDto }
   | { type: 'AddToList'; value: ValueDto; name: string }
   | { type: 'DeleteOfList'; index: ValueDto; name: string }
   | { type: 'DeleteAllOfList'; name: string }
@@ -286,6 +293,7 @@ export function defaultInstruction(type: InstructionType): InstructionDto {
     case 'WhenTime': return { id, type: 'WhenTime', schedule: { kind: 'Daily', hour: 9, minute: 0 } };
     case 'WhenPowerPluggedIn': return { id, type: 'WhenPowerPluggedIn' };
     case 'WhenPowerUnplugged': return { id, type: 'WhenPowerUnplugged' };
+    case 'WhenClipboardChanged': return { id, type: 'WhenClipboardChanged' };
     case 'OpenApp': return { id, type: 'OpenApp', command: '', name: '', icon: null };
     case 'CloseApp': return { id, type: 'CloseApp', command: '', name: '', icon: null };
     case 'Wait': return { id, type: 'Wait', duration: numberValue(1000) };
@@ -298,6 +306,7 @@ export function defaultInstruction(type: InstructionType): InstructionDto {
     case 'Comment': return { id, type: 'Comment', comment: '' };
     case 'SetVariable': return { id, type: 'SetVariable', name: '', value: numberValue(0) };
     case 'ChangeVariable': return { id, type: 'ChangeVariable', name: '', value: numberValue(0) };
+    case 'SetClipboard': return { id, type: 'SetClipboard', value: textValue('text') };
     case 'AddToList': return { id, type: 'AddToList', name: '', value: textValue('thing') };
     case 'DeleteOfList': return { id, type: 'DeleteOfList', name: '', index: numberValue(1) };
     case 'DeleteAllOfList': return { id, type: 'DeleteAllOfList', name: '' };

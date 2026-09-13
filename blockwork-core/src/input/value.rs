@@ -72,6 +72,15 @@ pub enum Op {
     /// Zero-arity boolean — whether the system is currently receiving
     /// external power. See `crate::battery::is_plugged_in`.
     PluggedIn,
+    /// Zero-arity — current clipboard contents as text. See
+    /// `crate::clipboard::get_text`.
+    ClipboardText,
+    /// Zero-arity boolean — whether the clipboard currently holds image
+    /// data. See `crate::clipboard::has_image`.
+    ClipboardHasImage,
+    /// Zero-arity boolean — whether the clipboard currently holds a file
+    /// list. See `crate::clipboard::has_file_list`.
+    ClipboardHasFiles,
     /// `args[0]` (a fixed dropdown, like `Case`'s upper/lowercase toggle) is
     /// one of `"Year"`/`"Month"`/`"Date"`/`"DayOfWeek"`/`"Hour"`/`"Minute"`/
     /// `"Second"`, naming which local-clock component to read right now.
@@ -268,6 +277,15 @@ pub const OPERATOR_KINDS: &[OperatorKindSpec] = &[
     // Zero-arity, like True/False — evaluates to whether the system is
     // currently on external power.
     OperatorKindSpec { kind: "PluggedIn", op: Op::PluggedIn, arity: 0, default_args: Vec::new },
+    // Zero-arity, like BatteryPercentage — evaluates to the live clipboard
+    // text contents.
+    OperatorKindSpec { kind: "ClipboardText", op: Op::ClipboardText, arity: 0, default_args: Vec::new },
+    // Zero-arity, like PluggedIn — evaluates to whether the clipboard
+    // currently holds image data.
+    OperatorKindSpec { kind: "ClipboardHasImage", op: Op::ClipboardHasImage, arity: 0, default_args: Vec::new },
+    // Zero-arity, like PluggedIn — evaluates to whether the clipboard
+    // currently holds a file list.
+    OperatorKindSpec { kind: "ClipboardHasFiles", op: Op::ClipboardHasFiles, arity: 0, default_args: Vec::new },
     // `args[0]` defaults to the dropdown's first ("Year") option — same
     // shape as `Case`, and matching valueOps.ts's CURRENT_TIME_OPTIONS order
     // (the frontend's own default for a freshly-dragged block always picks
@@ -400,6 +418,9 @@ impl Value {
             Value::Op { op: Op::False, .. } => Ok(Evaluated::Bool(false)),
             Value::Op { op: Op::BatteryPercentage, .. } => Ok(Evaluated::Number(crate::battery::percentage()?)),
             Value::Op { op: Op::PluggedIn, .. } => Ok(Evaluated::Bool(crate::battery::is_plugged_in())),
+            Value::Op { op: Op::ClipboardText, .. } => Ok(Evaluated::Text(crate::clipboard::get_text()?)),
+            Value::Op { op: Op::ClipboardHasImage, .. } => Ok(Evaluated::Bool(crate::clipboard::has_image())),
+            Value::Op { op: Op::ClipboardHasFiles, .. } => Ok(Evaluated::Bool(crate::clipboard::has_file_list())),
             Value::Op { op: Op::CurrentTime, args, .. } => {
                 use chrono::{Datelike, Timelike};
                 let now = chrono::Local::now();
@@ -455,7 +476,8 @@ impl Value {
                     }
                     Op::Join | Op::NewLine | Op::Tab | Op::Length | Op::IndexOf | Op::LastIndexOf | Op::LetterOf | Op::Case
                     | Op::Round | Op::Math | Op::True | Op::False | Op::Not | Op::And | Op::Or | Op::Eq | Op::Neq | Op::Gt | Op::Lt
-                    | Op::Gte | Op::Lte | Op::BatteryPercentage | Op::PluggedIn | Op::CurrentTime
+                    | Op::Gte | Op::Lte | Op::BatteryPercentage | Op::PluggedIn | Op::ClipboardText | Op::ClipboardHasImage
+                    | Op::ClipboardHasFiles | Op::CurrentTime
                     | Op::ListItem | Op::ListItemNumber | Op::ListAmount | Op::ListLength | Op::ListContains | Op::ListItemExists | Op::ListIsEmpty => unreachable!("matched above"),
                 };
                 Ok(Evaluated::Number(result))

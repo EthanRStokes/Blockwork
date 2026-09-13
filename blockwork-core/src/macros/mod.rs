@@ -372,6 +372,7 @@ impl InstructionKind {
                 | InstructionKind::WhenTime(_)
                 | InstructionKind::WhenPowerPluggedIn
                 | InstructionKind::WhenPowerUnplugged
+                | InstructionKind::WhenClipboardChanged
         )
     }
 
@@ -382,7 +383,8 @@ impl InstructionKind {
             InstructionKind::Wait(value)
             | InstructionKind::Return(value)
             | InstructionKind::WhenBatteryDischargedTo(value)
-            | InstructionKind::WhenBatteryChargedTo(value) => value.rename_var(old, new),
+            | InstructionKind::WhenBatteryChargedTo(value)
+            | InstructionKind::SetClipboard(value) => value.rename_var(old, new),
             InstructionKind::Token(token) => token.rename_var(old, new),
             InstructionKind::SetVariable(name, value)
             | InstructionKind::ChangeVariable(name, value) => {
@@ -452,6 +454,7 @@ impl InstructionKind {
             | InstructionKind::WhenTime(_)
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
+            | InstructionKind::WhenClipboardChanged
             | InstructionKind::OpenApp { .. }
             | InstructionKind::CloseApp { .. }
             | InstructionKind::DeleteAllOfList { .. }
@@ -466,7 +469,8 @@ impl InstructionKind {
             InstructionKind::Wait(value)
             | InstructionKind::Return(value)
             | InstructionKind::WhenBatteryDischargedTo(value)
-            | InstructionKind::WhenBatteryChargedTo(value) => value.rename_list(old, new),
+            | InstructionKind::WhenBatteryChargedTo(value)
+            | InstructionKind::SetClipboard(value) => value.rename_list(old, new),
             InstructionKind::Token(token) => token.rename_list(old, new),
             InstructionKind::SetVariable(_, value) | InstructionKind::ChangeVariable(_, value) => {
                 value.rename_list(old, new)
@@ -553,6 +557,7 @@ impl InstructionKind {
             | InstructionKind::WhenTime(_)
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
+            | InstructionKind::WhenClipboardChanged
             | InstructionKind::OpenApp { .. }
             | InstructionKind::CloseApp { .. } => {}
         }
@@ -569,7 +574,8 @@ impl InstructionKind {
             InstructionKind::Wait(value)
             | InstructionKind::Return(value)
             | InstructionKind::WhenBatteryDischargedTo(value)
-            | InstructionKind::WhenBatteryChargedTo(value) => value.migrate_bool_slots(false),
+            | InstructionKind::WhenBatteryChargedTo(value)
+            | InstructionKind::SetClipboard(value) => value.migrate_bool_slots(false),
             InstructionKind::Token(token) => token.migrate_bool_slots(),
             InstructionKind::SetVariable(_, value) | InstructionKind::ChangeVariable(_, value) => {
                 value.migrate_bool_slots(false)
@@ -635,6 +641,7 @@ impl InstructionKind {
             | InstructionKind::WhenTime(_)
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
+            | InstructionKind::WhenClipboardChanged
             | InstructionKind::OpenApp { .. }
             | InstructionKind::CloseApp { .. }
             | InstructionKind::DeleteAllOfList { .. }
@@ -649,7 +656,8 @@ impl InstructionKind {
             InstructionKind::Wait(value)
             | InstructionKind::Return(value)
             | InstructionKind::WhenBatteryDischargedTo(value)
-            | InstructionKind::WhenBatteryChargedTo(value) => value.rename_param(old, new),
+            | InstructionKind::WhenBatteryChargedTo(value)
+            | InstructionKind::SetClipboard(value) => value.rename_param(old, new),
             InstructionKind::Token(token) => token.rename_param(old, new),
             InstructionKind::SetVariable(_, value) | InstructionKind::ChangeVariable(_, value) => {
                 value.rename_param(old, new)
@@ -715,6 +723,7 @@ impl InstructionKind {
             | InstructionKind::WhenTime(_)
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
+            | InstructionKind::WhenClipboardChanged
             | InstructionKind::OpenApp { .. }
             | InstructionKind::CloseApp { .. }
             | InstructionKind::DeleteAllOfList { .. }
@@ -730,7 +739,8 @@ impl InstructionKind {
             InstructionKind::Wait(value)
             | InstructionKind::Return(value)
             | InstructionKind::WhenBatteryDischargedTo(value)
-            | InstructionKind::WhenBatteryChargedTo(value) => {
+            | InstructionKind::WhenBatteryChargedTo(value)
+            | InstructionKind::SetClipboard(value) => {
                 value.for_each_call_args_mut(block_id, f)
             }
             InstructionKind::Token(token) => token.for_each_call_args_mut(block_id, f),
@@ -809,6 +819,7 @@ impl InstructionKind {
             | InstructionKind::WhenTime(_)
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
+            | InstructionKind::WhenClipboardChanged
             | InstructionKind::OpenApp { .. }
             | InstructionKind::CloseApp { .. }
             | InstructionKind::DeleteAllOfList { .. }
@@ -824,7 +835,8 @@ impl InstructionKind {
             InstructionKind::Wait(value)
             | InstructionKind::Return(value)
             | InstructionKind::WhenBatteryDischargedTo(value)
-            | InstructionKind::WhenBatteryChargedTo(value) => value.scrub_block_calls(block_id),
+            | InstructionKind::WhenBatteryChargedTo(value)
+            | InstructionKind::SetClipboard(value) => value.scrub_block_calls(block_id),
             InstructionKind::Token(token) => token.scrub_block_calls(block_id),
             InstructionKind::SetVariable(_, value) | InstructionKind::ChangeVariable(_, value) => {
                 value.scrub_block_calls(block_id)
@@ -890,6 +902,7 @@ impl InstructionKind {
             | InstructionKind::WhenTime(_)
             | InstructionKind::WhenPowerPluggedIn
             | InstructionKind::WhenPowerUnplugged
+            | InstructionKind::WhenClipboardChanged
             | InstructionKind::OpenApp { .. }
             | InstructionKind::CloseApp { .. }
             | InstructionKind::DeleteAllOfList { .. }
@@ -1633,6 +1646,12 @@ pub enum InstructionKind {
     /// instead — never fires at all on a system with no battery/UPS, since
     /// `is_plugged_in` is always `true` there.
     WhenPowerUnplugged,
+    /// Header-only marker, no payload (like `WhenPowerPluggedIn`) — excluded
+    /// from Run/Loop and driven by a background watcher (`clipboard_watch`
+    /// in the desktop app), which fires this strand's body whenever the
+    /// clipboard's contents change. Edge-triggered like the other watcher
+    /// headers, but with no threshold to recover past — any change fires it.
+    WhenClipboardChanged,
     /// Launches an installed application, chosen via the desktop app's "Open
     /// App" picker (`src-tauri`'s `installed_apps` module lists candidates).
     /// `command` is the already-resolved, platform-specific launch string
@@ -1663,6 +1682,9 @@ pub enum InstructionKind {
     /// No-op if `value` isn't numeric; the variable is coerced to `0` first
     /// if it wasn't already numeric.
     ChangeVariable(String, Value),
+    /// `set clipboard to <value>` — overwrites the system clipboard with the
+    /// value's text. See `crate::clipboard::set_text`.
+    SetClipboard(Value),
     /// Appends a number/text value to a named list. Boolean values are ignored.
     AddToList {
         value: Value,
@@ -1932,6 +1954,13 @@ impl std::hash::Hash for InstructionKind {
                 30u8.hash(state);
                 name.hash(state);
             }
+            Self::SetClipboard(v) => {
+                31u8.hash(state);
+                v.hash(state);
+            }
+            Self::WhenClipboardChanged => {
+                32u8.hash(state);
+            }
         }
     }
 }
@@ -1948,6 +1977,7 @@ enum InstructionKindDe {
     WhenTime(TimeSchedule),
     WhenPowerPluggedIn,
     WhenPowerUnplugged,
+    WhenClipboardChanged,
     OpenApp {
         command: String,
         name: String,
@@ -1960,6 +1990,7 @@ enum InstructionKindDe {
     },
     SetVariable(String, Value),
     ChangeVariable(String, Value),
+    SetClipboard(Value),
     AddToList {
         value: Value,
         name: String,
@@ -2081,6 +2112,7 @@ impl From<InstructionKindDe> for InstructionKind {
             InstructionKindDe::WhenTime(s) => InstructionKind::WhenTime(s),
             InstructionKindDe::WhenPowerPluggedIn => InstructionKind::WhenPowerPluggedIn,
             InstructionKindDe::WhenPowerUnplugged => InstructionKind::WhenPowerUnplugged,
+            InstructionKindDe::WhenClipboardChanged => InstructionKind::WhenClipboardChanged,
             InstructionKindDe::OpenApp {
                 command,
                 name,
@@ -2101,6 +2133,7 @@ impl From<InstructionKindDe> for InstructionKind {
             },
             InstructionKindDe::SetVariable(n, v) => InstructionKind::SetVariable(n, v),
             InstructionKindDe::ChangeVariable(n, v) => InstructionKind::ChangeVariable(n, v),
+            InstructionKindDe::SetClipboard(v) => InstructionKind::SetClipboard(v),
             InstructionKindDe::AddToList { value, name } => {
                 InstructionKind::AddToList { value, name }
             }
